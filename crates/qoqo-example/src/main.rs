@@ -3,6 +3,8 @@ use roqoqo::operations::*;
 use roqoqo::Circuit;
 use roqoqo_quest::Backend;
 
+const NUM_SHOTS: usize = 1000;
+
 fn main() {
     // Build a Bell state circuit: H(0) → CNOT(0,1) → Measure
     let mut circuit = Circuit::new();
@@ -15,7 +17,7 @@ fn main() {
     circuit += CNOT::new(0, 1);
 
     // Measure all qubits 1000 times
-    circuit += PragmaRepeatedMeasurement::new("ro".to_string(), 1000, None);
+    circuit += PragmaRepeatedMeasurement::new("ro".to_string(), NUM_SHOTS, None);
 
     println!("Circuit:");
     println!("{}", circuit);
@@ -34,9 +36,14 @@ fn main() {
             let key = format!("{}{}", shot[0] as u8, shot[1] as u8);
             *counts.entry(key).or_insert(0u32) += 1;
         }
-        println!("\nMeasurement results (1000 shots):");
+        println!("\nMeasurement results ({NUM_SHOTS} shots):");
         for (state, count) in &counts {
-            println!("  |{}⟩: {} ({:.1}%)", state, count, *count as f64 / 10.0);
+            println!(
+                "  |{}⟩: {} ({:.1}%)",
+                state,
+                count,
+                *count as f64 / NUM_SHOTS as f64 * 100.0
+            );
         }
     }
 }
