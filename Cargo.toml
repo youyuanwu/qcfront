@@ -1,5 +1,14 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/*",
-]
+members = ["crates/*"]
+
+[workspace.dependencies]
+roqoqo = "1"
+roqoqo-quest = "0.18"
+qoqo_calculator = "1"
+num-integer = "0.1"
+num-traits = "0.2"
+rand = { version = "0.10", default-features = false, features = [
+    "std",
+    "thread_rng",
+] }

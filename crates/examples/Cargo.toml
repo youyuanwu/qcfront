@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-roqoqo = "1"
-roqoqo-quest = "0.18"
-qoqo_calculator = "1"
+algos = { path = "../algos" }
+roqoqo.workspace = true
+roqoqo-quest.workspace = true
+qoqo_calculator.workspace = true
