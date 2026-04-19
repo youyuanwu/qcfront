@@ -151,15 +151,23 @@ impl SatOracle {
 mod tests {
     use super::*;
     use crate::grover::{search_with_oracle, GroverConfig};
+    use crate::runner::BitRegisters;
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo::Circuit;
     use roqoqo_quest::Backend;
     use std::collections::HashMap;
 
-    fn run_backend(circuit: &Circuit, total_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
-        let backend = Backend::new(total_qubits, None);
-        let (bits, _, _) = backend.run_circuit(circuit).unwrap();
-        bits
+    fn test_runner(circuit: &Circuit, shots: usize) -> BitRegisters {
+        let num_qubits = circuit.number_of_qubits();
+        let backend = Backend::new(num_qubits, None);
+        let mut combined: BitRegisters = HashMap::new();
+        for _ in 0..shots {
+            let (bits, _, _) = backend.run_circuit(circuit).unwrap();
+            for (name, results) in bits {
+                combined.entry(name).or_default().extend(results);
+            }
+        }
+        combined
     }
 
     /// Test classical evaluation of (x₁ OR x₂) AND (¬x₁ OR x₃).
@@ -217,7 +225,7 @@ mod tests {
             num_shots: 100,
             ..Default::default()
         };
-        let result = search_with_oracle(&config, &grover_oracle, run_backend);
+        let result = search_with_oracle(&config, &grover_oracle, &test_runner);
 
         // Should find a satisfying assignment
         assert!(
@@ -246,7 +254,7 @@ mod tests {
             num_shots: 50,
             ..Default::default()
         };
-        let result = search_with_oracle(&config, &grover_oracle, run_backend);
+        let result = search_with_oracle(&config, &grover_oracle, &test_runner);
         assert_eq!(result.measured_state, 3); // binary 11
     }
 

@@ -5,17 +5,7 @@
 
 use algos::grover::{search_with_oracle, GroverConfig};
 use algos::sat::{sat_oracle, Literal};
-use roqoqo::backends::EvaluatingBackend;
-use roqoqo_quest::Backend;
-
-fn run_circuit(
-    circuit: &roqoqo::Circuit,
-    total_qubits: usize,
-) -> std::collections::HashMap<String, Vec<Vec<bool>>> {
-    let backend = Backend::new(total_qubits, None);
-    let (bits, _, _) = backend.run_circuit(circuit).expect("simulation failed");
-    bits
-}
+use examples::quest_runner::QuestRunner;
 
 fn main() {
     println!("=== Quantum SAT Solver (Grover's Algorithm) ===\n");
@@ -48,12 +38,13 @@ fn main() {
 
     // Run Grover's search
     println!("\nRunning Grover's search...");
+    let runner = QuestRunner;
     let config = GroverConfig {
         num_qubits: num_vars,
         num_shots: 100,
         ..Default::default()
     };
-    let result = search_with_oracle(&config, &grover_oracle, run_circuit);
+    let result = search_with_oracle(&config, &grover_oracle, &runner);
 
     let bits: String = (0..num_vars)
         .map(|b| {

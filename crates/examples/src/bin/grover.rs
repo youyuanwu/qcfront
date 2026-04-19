@@ -4,20 +4,12 @@
 //! multi-target search in N=4 (2 qubits).
 
 use algos::grover::{search, search_with_oracle, GroverConfig, GroverOracle};
-use roqoqo::backends::EvaluatingBackend;
-use roqoqo_quest::Backend;
-
-fn run_circuit(
-    circuit: &roqoqo::Circuit,
-    total_qubits: usize,
-) -> std::collections::HashMap<String, Vec<Vec<bool>>> {
-    let backend = Backend::new(total_qubits, None);
-    let (bits, _, _) = backend.run_circuit(circuit).expect("simulation failed");
-    bits
-}
+use examples::quest_runner::QuestRunner;
 
 fn main() {
     println!("=== Grover's Search Algorithm ===\n");
+
+    let runner = QuestRunner;
 
     // --- Single-target search (N=8) ---
     let target = rand::random_range(0..8usize);
@@ -28,7 +20,7 @@ fn main() {
         num_shots: 100,
         ..Default::default()
     };
-    let result = search(&config, target, run_circuit);
+    let result = search(&config, target, &runner);
 
     println!(
         "  Found: {} (probability {:.1}%, {} iterations)",
@@ -51,7 +43,7 @@ fn main() {
         num_shots: 100,
         ..Default::default()
     };
-    let result_multi = search_with_oracle(&config_multi, &oracle, run_circuit);
+    let result_multi = search_with_oracle(&config_multi, &oracle, &runner);
 
     println!(
         "  Found: {} (probability {:.1}%, {} iterations)",

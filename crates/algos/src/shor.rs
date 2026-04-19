@@ -4,12 +4,9 @@
 //! to factor semiprimes.
 //!
 //! The library is backend-agnostic: the top-level [`factor`] function accepts
-//! a closure that runs a circuit and returns measurement results. The caller
-//! supplies the backend.
+//! any [`QuantumRunner`](crate::runner::QuantumRunner) implementation.
 //!
 //! Currently supports N=15 only (hardcoded modular multiplication).
-
-use std::collections::HashMap;
 
 use num_integer::Integer;
 use roqoqo::operations::*;
@@ -17,6 +14,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::modmul_15::controlled_modmul_15;
 use crate::math::{convergents, mod_pow, random_coprime};
+use crate::runner::QuantumRunner;
 
 /// Configuration for Shor's factoring algorithm.
 pub struct ShorConfig {
@@ -46,14 +44,10 @@ pub struct ShorAttempt {
 
 /// Factor `n` using Shor's algorithm.
 ///
-/// The `run_circuit` closure executes a quantum circuit and returns bit-register
-/// measurements. This keeps the library backend-agnostic — the caller provides
-/// the backend.
-///
 /// # Arguments
 /// * `n` — the number to factor (currently only 15 supported)
 /// * `config` — algorithm configuration
-/// * `run_circuit` — closure `(circuit, total_qubits) -> HashMap<String, Vec<Vec<bool>>>`
+/// * `runner` — quantum circuit runner (simulator or hardware)
 ///
 /// # Returns
 /// `Some((p, q))` with `p ≤ q` and `p * q == n`, or `None` if all attempts failed.
@@ -61,35 +55,32 @@ pub struct ShorAttempt {
 /// # Example
 /// ```no_run
 /// use algos::shor::{factor, ShorConfig};
-/// use roqoqo::backends::EvaluatingBackend;
-/// use roqoqo_quest::Backend;
+/// use algos::runner::QuantumRunner;
 ///
-/// let result = factor(15, &ShorConfig::default(), |circuit, total_qubits| {
-///     let backend = Backend::new(total_qubits, None);
-///     let (bits, _, _) = backend.run_circuit(circuit).unwrap();
-///     bits
-/// });
+/// # fn example(runner: &impl QuantumRunner) {
+/// let result = factor(15, &ShorConfig::default(), runner);
 /// assert_eq!(result, Some((3, 5)));
+/// # }
 /// ```
-pub fn factor<F>(n: u64, config: &ShorConfig, run_circuit: F) -> Option<(u64, u64)>
-where
-    F: Fn(&Circuit, usize) -> HashMap<String, Vec<Vec<bool>>>,
-{
-    factor_verbose(n, config, run_circuit, |_| {})
+pub fn factor<R: QuantumRunner + ?Sized>(
+    n: u64,
+    config: &ShorConfig,
+    runner: &R,
+) -> Option<(u64, u64)> {
+    factor_verbose(n, config, runner, |_| {})
 }
 
 /// Factor `n` with detailed per-attempt reporting via callback.
 ///
 /// Same as [`factor`] but calls `on_attempt` after each coprime attempt,
 /// useful for logging/UI.
-pub fn factor_verbose<F, G>(
+pub fn factor_verbose<R: QuantumRunner + ?Sized, G>(
     n: u64,
     config: &ShorConfig,
-    run_circuit: F,
+    runner: &R,
     mut on_attempt: G,
 ) -> Option<(u64, u64)>
 where
-    F: Fn(&Circuit, usize) -> HashMap<String, Vec<Vec<bool>>>,
     G: FnMut(&ShorAttempt),
 {
     for _ in 0..config.max_attempts {
@@ -110,18 +101,21 @@ where
             return Some((small, big));
         }
 
-        let (circuit, _n_counting, total_qubits) = build_order_finding_circuit(a, n);
+        let (circuit, _n_counting) = build_order_finding_circuit(a, n);
+
+        // Execute all shots at once, then process results with early exit
+        let bit_registers = runner.run(&circuit, config.shots_per_attempt);
+        let counting_shots = bit_registers
+            .get("counting")
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
+
         let mut order = None;
         let mut factors = None;
         let mut shots_used = 0;
 
-        for shot in 0..config.shots_per_attempt {
-            shots_used = shot + 1;
-            let bit_registers = run_circuit(&circuit, total_qubits);
-            let bits = match bit_registers.get("counting") {
-                Some(shots) if !shots.is_empty() => &shots[0],
-                _ => continue,
-            };
+        for (shot_idx, bits) in counting_shots.iter().enumerate() {
+            shots_used = shot_idx + 1;
 
             if let Some(r) = extract_order(bits, a, n) {
                 order = Some(r);
@@ -161,18 +155,17 @@ where
 /// 4. Applies inverse QFT to counting register
 /// 5. Measures counting register into readout "counting"
 ///
-/// Returns `(circuit, n_counting, total_qubits)`.
+/// Returns `(circuit, n_counting)`.
 ///
 /// # Panics
 /// Panics if `n != 15` (only N=15 is currently supported).
-pub(crate) fn build_order_finding_circuit(a: u64, n: u64) -> (Circuit, usize, usize) {
+pub(crate) fn build_order_finding_circuit(a: u64, n: u64) -> (Circuit, usize) {
     assert_eq!(n, 15, "Only N=15 is currently supported");
     assert!(a > 1 && a < n && a.gcd(&n) == 1, "a must be coprime to n");
 
     let n_bits: usize = 4;
     let n_counting = 2 * n_bits; // 8 counting qubits
     let work: [usize; 4] = [n_counting, n_counting + 1, n_counting + 2, n_counting + 3];
-    let total_qubits = n_counting + n_bits; // 12
 
     let mut circuit = Circuit::new();
     circuit += DefinitionBit::new("counting".to_string(), n_counting, true);
@@ -203,7 +196,7 @@ pub(crate) fn build_order_finding_circuit(a: u64, n: u64) -> (Circuit, usize, us
         circuit += MeasureQubit::new(i, "counting".to_string(), i);
     }
 
-    (circuit, n_counting, total_qubits)
+    (circuit, n_counting)
 }
 
 /// Extract the order `r` from counting register measurement bits.
@@ -292,25 +285,31 @@ mod tests {
     use super::*;
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
+    use std::collections::HashMap;
+
+    fn run_one_shot(circuit: &Circuit) -> HashMap<String, Vec<Vec<bool>>> {
+        let num_qubits = circuit.number_of_qubits();
+        let backend = Backend::new(num_qubits, None);
+        let (bits, _, _) = backend.run_circuit(circuit).unwrap();
+        bits
+    }
 
     #[test]
     fn test_build_circuit_a7_n15() {
-        let (circuit, n_counting, total_qubits) = build_order_finding_circuit(7, 15);
+        let (circuit, n_counting) = build_order_finding_circuit(7, 15);
         assert_eq!(n_counting, 8);
-        assert_eq!(total_qubits, 12);
-        let _ = circuit;
+        assert_eq!(circuit.number_of_qubits(), 12);
     }
 
     #[test]
     fn test_order_finding_a7_n15() {
         // a=7, N=15: order r=4
         // Ideal QPE measurements: 0, 64, 128, 192 (multiples of 256/4)
-        let (circuit, _, total) = build_order_finding_circuit(7, 15);
-        let backend = Backend::new(total, None);
+        let (circuit, _) = build_order_finding_circuit(7, 15);
 
         let mut found_order = false;
         for _ in 0..20 {
-            let (bit_registers, _, _) = backend.run_circuit(&circuit).expect("sim failed");
+            let bit_registers = run_one_shot(&circuit);
             let bits = &bit_registers["counting"][0];
 
             if let Some(r) = extract_order(bits, 7, 15) {
@@ -325,12 +324,11 @@ mod tests {
     #[test]
     fn test_order_finding_a2_n15() {
         // a=2, N=15: order r=4
-        let (circuit, _, total) = build_order_finding_circuit(2, 15);
-        let backend = Backend::new(total, None);
+        let (circuit, _) = build_order_finding_circuit(2, 15);
 
         let mut found_order = false;
         for _ in 0..20 {
-            let (bit_registers, _, _) = backend.run_circuit(&circuit).expect("sim failed");
+            let bit_registers = run_one_shot(&circuit);
             let bits = &bit_registers["counting"][0];
 
             if let Some(r) = extract_order(bits, 2, 15) {
@@ -345,12 +343,11 @@ mod tests {
     #[test]
     fn test_order_finding_a11_n15() {
         // a=11, N=15: order r=2
-        let (circuit, _, total) = build_order_finding_circuit(11, 15);
-        let backend = Backend::new(total, None);
+        let (circuit, _) = build_order_finding_circuit(11, 15);
 
         let mut found_order = false;
         for _ in 0..20 {
-            let (bit_registers, _, _) = backend.run_circuit(&circuit).expect("sim failed");
+            let bit_registers = run_one_shot(&circuit);
             let bits = &bit_registers["counting"][0];
 
             if let Some(r) = extract_order(bits, 11, 15) {
@@ -386,12 +383,11 @@ mod tests {
         let n = 15u64;
         let a = 7u64;
 
-        let (circuit, _, total) = build_order_finding_circuit(a, n);
-        let backend = Backend::new(total, None);
+        let (circuit, _) = build_order_finding_circuit(a, n);
 
         let mut factors = None;
         for _ in 0..30 {
-            let (bit_registers, _, _) = backend.run_circuit(&circuit).expect("sim failed");
+            let bit_registers = run_one_shot(&circuit);
             let bits = &bit_registers["counting"][0];
 
             if let Some(r) = extract_order(bits, a, n) {

@@ -4,7 +4,7 @@
 //! unstructured search space of N = 2^n items in O(√N) queries.
 //!
 //! The library is backend-agnostic: [`search`] and [`search_with_oracle`]
-//! accept a closure that runs a circuit and returns measurement results.
+//! accept any [`QuantumRunner`](crate::runner::QuantumRunner) implementation.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,6 +12,7 @@ use roqoqo::operations::*;
 use roqoqo::Circuit;
 
 use crate::circuits::multi_cz::build_multi_cz;
+use crate::runner::QuantumRunner;
 
 /// Configuration for Grover's search.
 pub struct GroverConfig {
@@ -139,23 +140,22 @@ impl GroverResult {
 /// # Example
 /// ```no_run
 /// use algos::grover::{search, GroverConfig};
-/// use roqoqo::backends::EvaluatingBackend;
-/// use roqoqo_quest::Backend;
+/// use algos::runner::QuantumRunner;
 ///
+/// // Any QuantumRunner implementation works here
+/// # fn example(runner: &impl QuantumRunner) {
 /// let config = GroverConfig { num_qubits: 3, num_shots: 100, ..Default::default() };
-/// let result = search(&config, 5, |circuit, total_qubits| {
-///     let backend = Backend::new(total_qubits, None);
-///     let (bits, _, _) = backend.run_circuit(circuit).unwrap();
-///     bits
-/// });
+/// let result = search(&config, 5, runner);
 /// assert_eq!(result.success, Some(true));
+/// # }
 /// ```
-pub fn search<F>(config: &GroverConfig, target: usize, run_circuit: F) -> GroverResult
-where
-    F: Fn(&Circuit, usize) -> HashMap<String, Vec<Vec<bool>>>,
-{
+pub fn search<R: QuantumRunner + ?Sized>(
+    config: &GroverConfig,
+    target: usize,
+    runner: &R,
+) -> GroverResult {
     let oracle = GroverOracle::single(config.num_qubits, target);
-    let mut result = search_with_oracle(config, &oracle, run_circuit);
+    let mut result = search_with_oracle(config, &oracle, runner);
     result.success = Some(result.measured_state == target);
     result
 }
@@ -166,14 +166,11 @@ where
 /// - If `config.num_qubits < 2`
 /// - If `config.num_shots < 1`
 /// - If `config.num_qubits` doesn't match the oracle's `num_qubits`
-pub fn search_with_oracle<F>(
+pub fn search_with_oracle<R: QuantumRunner + ?Sized>(
     config: &GroverConfig,
     oracle: &GroverOracle,
-    run_circuit: F,
-) -> GroverResult
-where
-    F: Fn(&Circuit, usize) -> HashMap<String, Vec<Vec<bool>>>,
-{
+    runner: &R,
+) -> GroverResult {
     let n = config.num_qubits;
     assert!(n >= 2, "num_qubits must be >= 2, got {}", n);
     assert_eq!(
@@ -191,26 +188,24 @@ where
         .num_iterations
         .unwrap_or_else(|| optimal_iterations(n, oracle.num_solutions()));
 
-    let (circuit, total_qubits) = build_grover_circuit(n, oracle, iterations);
+    let circuit = build_grover_circuit(n, oracle, iterations);
 
-    // Collect measurement statistics across shots
+    // Execute all shots at once via the runner
+    let bit_registers = runner.run(&circuit, config.num_shots);
+
+    // Collect measurement statistics from the batched results
     let mut counts: HashMap<usize, usize> = HashMap::new();
-
-    for _ in 0..config.num_shots {
-        let bit_registers = run_circuit(&circuit, total_qubits);
-        let bits = match bit_registers.get("result") {
-            Some(shots) if !shots.is_empty() => &shots[0],
-            _ => continue,
-        };
-
-        // Convert bit vector to integer (LSB-first)
-        let mut state: usize = 0;
-        for (i, &bit) in bits.iter().enumerate().take(n) {
-            if bit {
-                state |= 1 << i;
+    if let Some(shots) = bit_registers.get("result") {
+        for bits in shots {
+            // Convert bit vector to integer (LSB-first)
+            let mut state: usize = 0;
+            for (i, &bit) in bits.iter().enumerate().take(n) {
+                if bit {
+                    state |= 1 << i;
+                }
             }
+            *counts.entry(state).or_insert(0) += 1;
         }
-        *counts.entry(state).or_insert(0) += 1;
     }
 
     let (&measured_state, &max_count) = counts
@@ -230,16 +225,13 @@ where
 }
 
 /// Build a complete Grover search circuit.
-///
-/// Returns `(circuit, total_qubits)`.
 pub(crate) fn build_grover_circuit(
     num_qubits: usize,
     oracle: &GroverOracle,
     num_iterations: usize,
-) -> (Circuit, usize) {
+) -> Circuit {
     let n = num_qubits;
     let n_ancillas = if n >= 4 { n - 2 } else { 0 };
-    let total_qubits = n + n_ancillas;
 
     let data_qubits: Vec<usize> = (0..n).collect();
     let ancillas: Vec<usize> = (n..n + n_ancillas).collect();
@@ -263,7 +255,7 @@ pub(crate) fn build_grover_circuit(
         circuit += MeasureQubit::new(q, "result".to_string(), i);
     }
 
-    (circuit, total_qubits)
+    circuit
 }
 
 /// Build the oracle sub-circuit that flips the phase of a single |target⟩.
@@ -340,13 +332,21 @@ fn optimal_iterations(num_qubits: usize, num_solutions: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::BitRegisters;
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
 
-    fn run_backend(circuit: &Circuit, total_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
-        let backend = Backend::new(total_qubits, None);
-        let (bits, _, _) = backend.run_circuit(circuit).unwrap();
-        bits
+    fn test_runner(circuit: &Circuit, shots: usize) -> BitRegisters {
+        let num_qubits = circuit.number_of_qubits();
+        let backend = Backend::new(num_qubits, None);
+        let mut combined: BitRegisters = HashMap::new();
+        for _ in 0..shots {
+            let (bits, _, _) = backend.run_circuit(circuit).unwrap();
+            for (name, results) in bits {
+                combined.entry(name).or_default().extend(results);
+            }
+        }
+        combined
     }
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
         };
 
         for target in 0..4 {
-            let result = search(&config, target, run_backend);
+            let result = search(&config, target, &test_runner);
             assert_eq!(
                 result.success,
                 Some(true),
@@ -402,7 +402,7 @@ mod tests {
         };
 
         for target in [0, 3, 5, 7] {
-            let result = search(&config, target, run_backend);
+            let result = search(&config, target, &test_runner);
             assert_eq!(
                 result.success,
                 Some(true),
@@ -422,7 +422,7 @@ mod tests {
             num_shots: 20,
             ..Default::default()
         };
-        let result = search(&config, 2, run_backend);
+        let result = search(&config, 2, &test_runner);
 
         assert_eq!(result.num_iterations, 1);
         assert!(!result.counts.is_empty());
@@ -439,7 +439,7 @@ mod tests {
             num_iterations: Some(2),
             num_shots: 50,
         };
-        let result = search(&config, 6, run_backend);
+        let result = search(&config, 6, &test_runner);
         assert_eq!(result.num_iterations, 2);
         assert_eq!(result.success, Some(true));
     }
@@ -453,7 +453,7 @@ mod tests {
             ..Default::default()
         };
         let oracle = GroverOracle::single(2, 3);
-        let result = search_with_oracle(&config, &oracle, run_backend);
+        let result = search_with_oracle(&config, &oracle, &test_runner);
         assert!(result.success.is_none());
         assert!(result.is_match(3));
     }
@@ -470,7 +470,7 @@ mod tests {
         let oracle = GroverOracle::multi(3, &[2, 5]);
         assert_eq!(oracle.num_solutions(), 2);
 
-        let result = search_with_oracle(&config, &oracle, run_backend);
+        let result = search_with_oracle(&config, &oracle, &test_runner);
         assert!(
             result.measured_state == 2 || result.measured_state == 5,
             "Expected target 2 or 5, got {}",
@@ -502,7 +502,7 @@ mod tests {
             num_shots: 20,
             ..Default::default()
         };
-        let result = search(&config, 1, run_backend);
+        let result = search(&config, 1, &test_runner);
         assert!(result.is_match(1));
         assert!(!result.is_match(2));
     }
@@ -515,7 +515,7 @@ mod tests {
             num_shots: 10,
             ..Default::default()
         };
-        search(&config, 0, run_backend);
+        search(&config, 0, &test_runner);
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
             num_shots: 10,
             ..Default::default()
         };
-        search(&config, 8, run_backend);
+        search(&config, 8, &test_runner);
     }
 
     #[test]
@@ -537,7 +537,7 @@ mod tests {
             num_shots: 0,
             ..Default::default()
         };
-        search(&config, 3, run_backend);
+        search(&config, 3, &test_runner);
     }
 
     #[test]
