@@ -1,0 +1,8 @@
+[package]
+name = "qoqo-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+roqoqo = "1"
+roqoqo-quest = "0.18"

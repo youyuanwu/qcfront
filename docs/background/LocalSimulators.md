@@ -1044,6 +1044,147 @@ Yao.jl Protocol:
   Pure Julia. No FFI. No serialization. GPU via type dispatch.
 ```
 
+### Rust-Based Simulators and Frameworks
+
+The Rust quantum computing ecosystem is growing rapidly. These are usable today, though none yet match the maturity of Python-based frameworks in algorithm libraries or hardware integrations.
+
+#### roqoqo / qoqo (HQS Quantum Simulations)
+
+```bash
+# Rust
+cargo add roqoqo
+# Python (optional)
+pip install qoqo
+```
+
+| Feature | Detail |
+|---|---|
+| **Language** | Rust (core) + Python bindings (PyO3) |
+| **Type** | Full circuit framework (not just a simulator) |
+| **Max qubits** | Backend-dependent (QuEST, Qiskit, Braket) |
+| **GPU** | Via backends |
+| **Repo** | [HQSquantumsimulations/qoqo](https://github.com/HQSquantumsimulations/qoqo) |
+| **Published** | ✅ crates.io |
+| **Best for** | Closest to "Qiskit for Rust" — circuit construction, serialization, multi-backend |
+
+The most mature Rust quantum framework. Backed by a company (HQS Quantum Simulations, Germany). Provides circuit construction, serialization, and pluggable backends.
+
+```rust
+use roqoqo::Circuit;
+use roqoqo::operations::*;
+
+let mut circuit = Circuit::new();
+circuit.add_operation(Hadamard::new(0));
+circuit.add_operation(CNOT::new(0, 1));
+circuit.add_operation(MeasureQubit::new(0, "ro".into(), 0));
+// Execute via backend (e.g., qoqo_quest for QuEST simulation)
+```
+
+**Protocol:** Pure Rust — circuit is a Rust struct with a `Vec<Operation>`. Backends receive the circuit by reference. Serialization to JSON/bincode available for program exchange. Python bindings via PyO3 expose the same types.
+
+#### spinoza
+
+```bash
+cargo add spinoza
+```
+
+| Feature | Detail |
+|---|---|
+| **Language** | Pure Rust + Python bindings (spynoza) |
+| **Type** | High-performance state-vector simulator |
+| **Max qubits** | ~30 (limited by RAM, like all SV sims) |
+| **GPU** | ✗ |
+| **SIMD** | ✅ Optimized |
+| **Repo** | [QuState/spinoza](https://github.com/QuState/spinoza) |
+| **Published** | ✅ crates.io |
+| **Best for** | Fastest pure-Rust state-vector simulation, SIMD-optimized |
+
+Academic project with a published paper on its design. Focuses purely on simulation speed.
+
+```rust
+use spinoza::core::State;
+use spinoza::gates::{h, cx};
+
+let mut state = State::new(2);
+h(&mut state, 0);
+cx(&mut state, 0, 1);
+// state now holds Bell state amplitudes
+```
+
+**Protocol:** Functional API — gates are free functions that mutate a `State` struct in-place. No circuit object. No serialization boundary. Pure Rust, SIMD-optimized inner loops.
+
+#### QCGPU
+
+```bash
+cargo add qcgpu
+```
+
+| Feature | Detail |
+|---|---|
+| **Language** | Rust + OpenCL |
+| **Type** | GPU-accelerated state-vector simulator |
+| **Max qubits** | ~30-35 |
+| **GPU** | ✅ OpenCL (NVIDIA, AMD, Intel) |
+| **Repo** | [QCGPU/qcgpu-rust](https://github.com/QCGPU/qcgpu-rust) |
+| **Published** | ✅ crates.io |
+| **Best for** | GPU-accelerated simulation from Rust |
+
+```rust
+use qcgpu::Simulator;
+
+let mut sim = Simulator::new(2);
+sim.h(0);
+sim.cx(0, 1);
+let probabilities = sim.probabilities();
+```
+
+**Protocol:** Imperative gate-by-gate API. Each gate call dispatches an OpenCL kernel to GPU. No circuit object, immediate execution.
+
+#### Q# / qsc (Microsoft QDK)
+
+```bash
+# Not published on crates.io — use git dependency
+[dependencies]
+qsc = { git = "https://github.com/microsoft/qdk" }
+```
+
+| Feature | Detail |
+|---|---|
+| **Language** | Rust |
+| **Type** | Full compiler + sparse state-vector simulator |
+| **Max qubits** | ~30-50 (sparse) |
+| **GPU** | ✗ |
+| **Repo** | [microsoft/qdk](https://github.com/microsoft/qdk) |
+| **Published** | ✗ (internal, git-only) |
+| **Best for** | Compiling and simulating Q# from Rust |
+
+The most feature-rich Rust quantum codebase, but not designed for external consumption. API is internal and unstable.
+
+**Protocol:** Q# source string → Rust compiler → QIR → Rust sparse simulator. All in-process, all Rust. No FFI boundaries.
+
+#### Smaller Rust Crates
+
+| Crate | crates.io | Notes |
+|---|---|---|
+| **q1tsim** | ✅ | Simple sim, OpenQASM export, LaTeX circuit diagrams |
+| **quantr** | ✅ | Beginner-friendly, terminal circuit output, supports non-unitary gates |
+| **quantum** | ✅ | Pedagogical — complete but minimal implementation |
+| **quantrs2** | ✅ | Newer, modular workspace, SIMD, ambitious but early stage |
+| **struqture** | ✅ | Quantum operator framework (Hamiltonians, open systems), not a circuit sim |
+
+#### Rust Ecosystem Maturity Summary
+
+| Aspect | Rust | Python (Qiskit/Cirq) |
+|---|---|---|
+| Circuit construction | ✅ roqoqo | ✅ Mature |
+| Simulation | ✅ spinoza, QCGPU | ✅ Aer, qsim |
+| Hardware backends | ⚠️ Via roqoqo (QuEST, Braket) | ✅ Native (IBM, Google, IonQ, Rigetti) |
+| Algorithm libraries | ✗ Minimal | ✅ Extensive (Shor, VQE, QAOA, etc.) |
+| Tutorials / community | ✗ Small | ✅ Massive |
+| Noise modeling | ⚠️ Via backends | ✅ Built-in |
+| Published crates | ✅ Several on crates.io | ✅ PyPI |
+| Compiler from quantum language | ✅ qsc (Q#) | ✗ (Python DSL, not compiled) |
+
 ---
 
 ## Comparison Summary
@@ -1065,6 +1206,9 @@ Yao.jl Protocol:
 | Intel-QS | Standalone | C++ | ~40+ (MPI) | ✗ | ✗ | Build from source |
 | Quantum++ | Standalone | C++17 | ~30 | ✗ | ✅ | Header-only |
 | Yao.jl | Standalone | Julia | ~30 | ✅ | ✗ | Julia `Pkg.add` |
+| roqoqo/qoqo | Standalone | Rust | Backend-dep. | Via backend | Via backend | `cargo add` / `pip` |
+| spinoza | Standalone | Rust | ~30 | ✗ | ✗ | `cargo add` |
+| QCGPU | Standalone | Rust (OpenCL) | ~30-35 | ✅ | ✗ | `cargo add` |
 
 ### Annealing Simulators
 
@@ -1188,3 +1332,8 @@ If you want Aer-like features from pure C++ without Python, here are the best al
 - [Qulacs GitHub](https://github.com/qulacs/qulacs)
 - [Yao.jl GitHub](https://github.com/QuantumBFS/Yao.jl)
 - [Awesome Quantum Software](https://github.com/qosf/awesome-quantum-software)
+- [roqoqo / qoqo GitHub](https://github.com/HQSquantumsimulations/qoqo)
+- [spinoza GitHub](https://github.com/QuState/spinoza)
+- [QCGPU GitHub](https://github.com/QCGPU/qcgpu-rust)
+- [q1tsim on crates.io](https://crates.io/crates/q1tsim)
+- [quantr on crates.io](https://crates.io/crates/quantr)
