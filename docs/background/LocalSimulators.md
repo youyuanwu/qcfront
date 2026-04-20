@@ -303,25 +303,26 @@ Qiskit Backend.run(circuit)
     Same Qobj format for both.
 ```
 
-**Google Quantum Engine + qsim — ✅ Identical via Engine API**
+**Google Quantum Engine + qsim — ✅ Same format via Engine API**
 
-When used through Google Quantum Engine (GQE), both the qsim cloud simulator and real hardware (Sycamore/Willow) accept the **same protobuf circuit format** via the same API:
+When used through Google Quantum Engine (GQE), both the cloud simulator and real hardware (Sycamore/Willow) accept the **same protobuf circuit format** via the same Cloud API:
 
 ```python
 engine = cirq_google.Engine(project_id="my-project")
 
-# Simulator — same Engine API
+# Cloud simulator — Engine API
 result = engine.run(circuit, processor_id="qsimulator", repetitions=1000)
 # Hardware — same Engine API
 result = engine.run(circuit, processor_id="weber", repetitions=1000)
 ```
 
-**However**, Cirq's **local** built-in simulator (`cirq.Simulator()`) does NOT use protobuf — it operates directly on Python objects. So there's a mismatch between local sim and cloud:
+**However**, when qsim runs **locally** (via `qsimcirq`), it is an **in-process C++ library** loaded via pybind11 — no gRPC or network protocol is involved. The circuit is serialized to protobuf and passed in-process to the C++ engine. So there's a format match (same protobuf) but not a protocol match:
 
 ```
-cirq.Simulator()              → Python objects (local, no protobuf)
-cirq_google.Engine(qsimulator) → Protobuf (cloud, same as hardware) ✅
-cirq_google.Engine(weber)      → Protobuf (cloud, real QPU)         ✅
+qsimcirq.QSimSimulator()      → Protobuf via pybind11 (local, in-process)
+cirq.Simulator()               → Python objects (local, no protobuf)
+cirq_google.Engine(qsimulator) → Protobuf via Cloud API (remote)       ✅
+cirq_google.Engine(weber)      → Protobuf via Cloud API (real QPU)     ✅
 ```
 
 **Q# / Azure Quantum — ✅ Same QIR for all targets**
@@ -395,8 +396,8 @@ The `EmbeddingComposite(DWaveSampler())` wrapper makes this transparent — same
 |---|---|---|---|---|
 | **IonQ (cloud sim)** | REST + JSON | REST + JSON | ✅ Identical | Change `target` string |
 | **Qiskit / IBM** | Qobj via Pybind11 | Qobj via REST | ✅ Same format | Change `backend` |
-| **Google / Engine** | Protobuf via gRPC | Protobuf via gRPC | ✅ Identical | Change `processor_id` |
-| **Cirq local sim** | Python objects | Protobuf via gRPC | ✗ Different | Must use Engine API |
+| **Google / Engine** | Protobuf via pybind11 | Protobuf via Cloud API | ✅ Same format | Change `processor_id` |
+| **Cirq local sim** | Python objects | Protobuf via Cloud API | ✗ Different | Must use Engine API |
 | **Q# / Azure** | QIR via PyO3 | QIR via REST | ✅ Same format | Change `target` |
 | **Rigetti QVM** | Quil via rpcq | Quil via rpcq | ✅ Identical | Change `get_qc()` name |
 | **D-Wave local** | Python objects | JSON via REST | ⚠️ Same data, different wire | Transparent via SDK |
