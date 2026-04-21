@@ -8,12 +8,21 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+/// Number of ancilla qubits required by [`build_multi_cz`] for `n` qubits.
+pub fn required_ancillas(n: usize) -> usize {
+    if n >= 4 {
+        n - 2
+    } else {
+        0
+    }
+}
+
 /// Build a multi-controlled-Z gate that flips the phase of |11…1⟩.
 ///
 /// # Arguments
 /// * `qubits` — data qubits participating in the gate (len ≥ 1)
 /// * `ancillas` — scratch qubits initialized to |0⟩; must have
-///   `ancillas.len() == max(0, qubits.len() - 2)` for n ≥ 3, or be empty for n ≤ 2.
+///   `ancillas.len() == required_ancillas(qubits.len())`.
 ///
 /// # Panics
 /// Panics if `qubits` is empty or if the ancilla count doesn't match.
@@ -21,7 +30,7 @@ pub fn build_multi_cz(qubits: &[usize], ancillas: &[usize]) -> Circuit {
     let n = qubits.len();
     assert!(n >= 1, "build_multi_cz requires at least 1 qubit");
 
-    let expected_ancillas = if n >= 4 { n - 2 } else { 0 };
+    let expected_ancillas = required_ancillas(n);
     debug_assert_eq!(
         ancillas.len(),
         expected_ancillas,

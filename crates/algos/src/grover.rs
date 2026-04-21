@@ -3,16 +3,93 @@
 //! Implements Grover's quantum search for finding a marked item in an
 //! unstructured search space of N = 2^n items in O(√N) queries.
 //!
-//! The library is backend-agnostic: [`search`] and [`search_with_oracle`]
+//! The library is backend-agnostic: [`search`] and [`try_search_with_oracle`]
 //! accept any [`QuantumRunner`](crate::runner::QuantumRunner) implementation.
+//!
+//! ## Oracle Trait
+//!
+//! The [`Oracle`] trait abstracts over different marking strategies.
+//! [`IndexOracle`] marks states by index (simple, solution set known).
+//! Custom oracles (e.g., circuit-based SAT evaluation) can implement
+//! the trait to provide quantum advantage on hard search problems.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::num::NonZeroUsize;
 
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
-use crate::circuits::multi_cz::build_multi_cz;
+use crate::circuits::multi_cz::{build_multi_cz, required_ancillas};
 use crate::runner::QuantumRunner;
+
+// ---------------------------------------------------------------------------
+// Oracle trait
+// ---------------------------------------------------------------------------
+
+/// A phase oracle for Grover's algorithm.
+///
+/// **Phase oracle invariant**: Implementors must satisfy
+///   `O|x⟩|0⟩ = (-1)^f(x)|x⟩|0⟩` for all x.
+///
+/// Concretely:
+/// - Flip the phase of solution states, leave others unchanged
+/// - Restore all ancilla qubits to |0⟩ before returning
+/// - Do NOT apply non-diagonal operations to data qubits
+///   (amplitudes must not change, only phases)
+///
+/// A bit-flip oracle (writes f(x) into an ancilla instead of
+/// flipping phase) will silently produce wrong results. Use the
+/// compute → MCZ → uncompute pattern, not compute → leave.
+pub trait Oracle {
+    /// Number of data qubits this oracle operates on (search space = 2^n).
+    fn num_data_qubits(&self) -> usize;
+
+    /// Total ancilla qubits this oracle needs (MCZ/MCX decomposition
+    /// scratch, clause ancillas, etc.). The driver allocates these
+    /// **disjoint** from the diffuser's own MCZ ancillas.
+    fn num_ancillas(&self) -> usize;
+
+    /// Number of solutions, if known. Enables auto-computing the
+    /// optimal iteration count. Return `None` when unknown (caller
+    /// must set `GroverConfig::num_iterations` explicitly).
+    fn num_solutions(&self) -> Option<NonZeroUsize>;
+
+    /// Emit gates into `circuit` that flip the phase of solution states.
+    ///
+    /// - `data_qubits`: the search register (indices chosen by the driver)
+    /// - `ancillas`: scratch qubits owned exclusively by this oracle,
+    ///   initialized to |0⟩. Must be restored to |0⟩ before returning.
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]);
+}
+
+// ---------------------------------------------------------------------------
+// GroverError
+// ---------------------------------------------------------------------------
+
+/// Errors from [`try_search_with_oracle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroverError {
+    /// `num_iterations` is required when the oracle's `num_solutions()`
+    /// returns `None`.
+    IterationsRequired,
+}
+
+impl fmt::Display for GroverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IterationsRequired => write!(
+                f,
+                "num_iterations must be set in GroverConfig when the oracle's \
+                 num_solutions() returns None"
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 
 /// Configuration for Grover's search.
 pub struct GroverConfig {
@@ -35,18 +112,26 @@ impl Default for GroverConfig {
     }
 }
 
-/// Oracle that marks solution states with a phase flip.
+// ---------------------------------------------------------------------------
+// IndexOracle (formerly GroverOracle)
+// ---------------------------------------------------------------------------
+
+/// Oracle that marks solution states by index with a phase flip.
 ///
-/// **Phase oracle contract:** The oracle flips the phase of solution states
-/// and leaves all other states unchanged. All ancilla qubits are restored
-/// to |0⟩ after each application.
-/// Formally: O|x⟩|0⟩ = (-1)^f(x)|x⟩|0⟩ for all x.
-pub struct GroverOracle {
+/// For each target, applies X gates to map the target to |11…1⟩, then
+/// a multi-controlled-Z to flip the phase, then undoes the X gates.
+/// Each target is marked independently — the X-MCZ-X pattern is selective
+/// to exactly one computational basis state per target.
+pub struct IndexOracle {
     targets: Vec<usize>,
     num_qubits: usize,
 }
 
-impl GroverOracle {
+/// Backward-compatible alias for [`IndexOracle`].
+#[deprecated(note = "renamed to IndexOracle")]
+pub type GroverOracle = IndexOracle;
+
+impl IndexOracle {
     /// Mark a single target state.
     ///
     /// # Panics
@@ -90,19 +175,31 @@ impl GroverOracle {
             num_qubits,
         }
     }
+}
 
-    /// Number of marked solutions. Used for optimal iteration count.
-    pub fn num_solutions(&self) -> usize {
-        self.targets.len()
+impl Oracle for IndexOracle {
+    fn num_data_qubits(&self) -> usize {
+        self.num_qubits
     }
 
-    /// Apply the oracle to a circuit.
-    pub(crate) fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+    fn num_ancillas(&self) -> usize {
+        required_ancillas(self.num_qubits)
+    }
+
+    fn num_solutions(&self) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(self.targets.len())
+    }
+
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
         for &target in &self.targets {
             apply_target_oracle(circuit, data_qubits, ancillas, target);
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Result
+// ---------------------------------------------------------------------------
 
 /// Result of a Grover search.
 #[derive(Debug, Clone)]
@@ -112,7 +209,7 @@ pub struct GroverResult {
     /// Fraction of shots yielding `measured_state`.
     pub probability: f64,
     /// `Some(true/false)` when target is known via [`search`]; `None` for
-    /// oracle-based search via [`search_with_oracle`].
+    /// oracle-based search via [`try_search_with_oracle`].
     pub success: Option<bool>,
     /// Number of Grover iterations used.
     pub num_iterations: usize,
@@ -127,56 +224,54 @@ impl GroverResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 /// Run Grover's search for a known target.
 ///
-/// Convenience wrapper around [`search_with_oracle`] that creates a single-target
-/// oracle and sets `success` in the result.
+/// Convenience wrapper around [`try_search_with_oracle`] that creates a
+/// single-target oracle and sets `success` in the result.
 ///
 /// # Panics
 /// - If `config.num_qubits < 2`
 /// - If `target >= 2^config.num_qubits`
 /// - If `config.num_shots < 1`
-///
-/// # Example
-/// ```no_run
-/// use algos::grover::{search, GroverConfig};
-/// use algos::runner::QuantumRunner;
-///
-/// // Any QuantumRunner implementation works here
-/// # fn example(runner: &impl QuantumRunner) {
-/// let config = GroverConfig { num_qubits: 3, num_shots: 100, ..Default::default() };
-/// let result = search(&config, 5, runner);
-/// assert_eq!(result.success, Some(true));
-/// # }
-/// ```
 pub fn search<R: QuantumRunner + ?Sized>(
     config: &GroverConfig,
     target: usize,
     runner: &R,
 ) -> GroverResult {
-    let oracle = GroverOracle::single(config.num_qubits, target);
-    let mut result = search_with_oracle(config, &oracle, runner);
+    let oracle = IndexOracle::single(config.num_qubits, target);
+    let mut result = try_search_with_oracle(config, &oracle, runner)
+        .expect("IndexOracle always provides num_solutions");
     result.success = Some(result.measured_state == target);
     result
 }
 
-/// Run Grover's search with a custom oracle.
+/// Run Grover's search with a custom oracle (returns `Result`).
+///
+/// # Errors
+/// Returns [`GroverError::IterationsRequired`] when `config.num_iterations`
+/// is `None` and the oracle's `num_solutions()` returns `None`.
 ///
 /// # Panics
 /// - If `config.num_qubits < 2`
 /// - If `config.num_shots < 1`
-/// - If `config.num_qubits` doesn't match the oracle's `num_qubits`
-pub fn search_with_oracle<R: QuantumRunner + ?Sized>(
+/// - If `config.num_qubits != oracle.num_data_qubits()`
+pub fn try_search_with_oracle<O: Oracle + ?Sized, R: QuantumRunner + ?Sized>(
     config: &GroverConfig,
-    oracle: &GroverOracle,
+    oracle: &O,
     runner: &R,
-) -> GroverResult {
+) -> Result<GroverResult, GroverError> {
     let n = config.num_qubits;
     assert!(n >= 2, "num_qubits must be >= 2, got {}", n);
     assert_eq!(
-        n, oracle.num_qubits,
-        "config.num_qubits ({}) must match oracle num_qubits ({})",
-        n, oracle.num_qubits
+        n,
+        oracle.num_data_qubits(),
+        "config.num_qubits ({}) must match oracle.num_data_qubits() ({})",
+        n,
+        oracle.num_data_qubits()
     );
     assert!(
         config.num_shots >= 1,
@@ -184,20 +279,19 @@ pub fn search_with_oracle<R: QuantumRunner + ?Sized>(
         config.num_shots
     );
 
-    let iterations = config
-        .num_iterations
-        .unwrap_or_else(|| optimal_iterations(n, oracle.num_solutions()));
+    let iterations = match (config.num_iterations, oracle.num_solutions()) {
+        (Some(k), _) => k,
+        (None, Some(m)) => optimal_iterations(n, m.get()),
+        (None, None) => return Err(GroverError::IterationsRequired),
+    };
 
     let circuit = build_grover_circuit(n, oracle, iterations);
 
-    // Execute all shots at once via the runner
     let bit_registers = runner.run(&circuit, config.num_shots);
 
-    // Collect measurement statistics from the batched results
     let mut counts: HashMap<usize, usize> = HashMap::new();
     if let Some(shots) = bit_registers.get("result") {
         for bits in shots {
-            // Convert bit vector to integer (LSB-first)
             let mut state: usize = 0;
             for (i, &bit) in bits.iter().enumerate().take(n) {
                 if bit {
@@ -215,26 +309,52 @@ pub fn search_with_oracle<R: QuantumRunner + ?Sized>(
 
     let probability = max_count as f64 / config.num_shots as f64;
 
-    GroverResult {
+    Ok(GroverResult {
         measured_state,
         probability,
         success: None,
         num_iterations: iterations,
         counts,
-    }
+    })
 }
 
-/// Build a complete Grover search circuit.
-pub(crate) fn build_grover_circuit(
+/// Run Grover's search with a custom oracle.
+///
+/// # Panics
+/// - If `config.num_qubits < 2`
+/// - If `config.num_shots < 1`
+/// - If `config.num_qubits` doesn't match the oracle's `num_data_qubits()`
+/// - If `config.num_iterations` is `None` and the oracle can't provide
+///   `num_solutions()`
+#[deprecated(note = "use try_search_with_oracle which returns Result")]
+pub fn search_with_oracle<R: QuantumRunner + ?Sized>(
+    config: &GroverConfig,
+    oracle: &IndexOracle,
+    runner: &R,
+) -> GroverResult {
+    try_search_with_oracle(config, oracle, runner)
+        .expect("search_with_oracle requires oracle with known num_solutions")
+}
+
+// ---------------------------------------------------------------------------
+// Circuit construction (internal)
+// ---------------------------------------------------------------------------
+
+/// Build a complete Grover search circuit with disjoint qubit regions.
+///
+/// Layout: `[data (n)] [diffuser MCZ scratch (d)] [oracle scratch (a)]`
+fn build_grover_circuit<O: Oracle + ?Sized>(
     num_qubits: usize,
-    oracle: &GroverOracle,
+    oracle: &O,
     num_iterations: usize,
 ) -> Circuit {
     let n = num_qubits;
-    let n_ancillas = if n >= 4 { n - 2 } else { 0 };
+    let d = required_ancillas(n);
+    let a = oracle.num_ancillas();
 
     let data_qubits: Vec<usize> = (0..n).collect();
-    let ancillas: Vec<usize> = (n..n + n_ancillas).collect();
+    let diffuser_ancillas: Vec<usize> = (n..n + d).collect();
+    let oracle_ancillas: Vec<usize> = (n + d..n + d + a).collect();
 
     let mut circuit = Circuit::new();
     circuit += DefinitionBit::new("result".to_string(), n, true);
@@ -246,8 +366,8 @@ pub(crate) fn build_grover_circuit(
 
     // 2. Repeat Grover iterations
     for _ in 0..num_iterations {
-        oracle.apply(&mut circuit, &data_qubits, &ancillas);
-        build_diffuser(&mut circuit, &data_qubits, &ancillas);
+        oracle.apply(&mut circuit, &data_qubits, &oracle_ancillas);
+        build_diffuser(&mut circuit, &data_qubits, &diffuser_ancillas);
     }
 
     // 3. Measure data qubits
@@ -444,7 +564,7 @@ mod tests {
         assert_eq!(result.success, Some(true));
     }
 
-    /// search_with_oracle returns success=None.
+    /// try_search_with_oracle returns success=None.
     #[test]
     fn test_search_with_oracle_no_success() {
         let config = GroverConfig {
@@ -452,8 +572,8 @@ mod tests {
             num_shots: 50,
             ..Default::default()
         };
-        let oracle = GroverOracle::single(2, 3);
-        let result = search_with_oracle(&config, &oracle, &test_runner);
+        let oracle = IndexOracle::single(2, 3);
+        let result = try_search_with_oracle(&config, &oracle, &test_runner).unwrap();
         assert!(result.success.is_none());
         assert!(result.is_match(3));
     }
@@ -467,10 +587,10 @@ mod tests {
             num_shots: 100,
             ..Default::default()
         };
-        let oracle = GroverOracle::multi(3, &[2, 5]);
-        assert_eq!(oracle.num_solutions(), 2);
+        let oracle = IndexOracle::multi(3, &[2, 5]);
+        assert_eq!(oracle.num_solutions().unwrap().get(), 2);
 
-        let result = search_with_oracle(&config, &oracle, &test_runner);
+        let result = try_search_with_oracle(&config, &oracle, &test_runner).unwrap();
         assert!(
             result.measured_state == 2 || result.measured_state == 5,
             "Expected target 2 or 5, got {}",
@@ -490,8 +610,8 @@ mod tests {
     /// Multi-target oracle deduplicates.
     #[test]
     fn test_multi_target_dedup() {
-        let oracle = GroverOracle::multi(3, &[5, 5, 3, 5, 3]);
-        assert_eq!(oracle.num_solutions(), 2); // only {3, 5}
+        let oracle = IndexOracle::multi(3, &[5, 5, 3, 5, 3]);
+        assert_eq!(oracle.num_solutions().unwrap().get(), 2); // only {3, 5}
     }
 
     /// is_match helper works.
@@ -543,13 +663,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "targets must not be empty")]
     fn test_multi_target_panics_on_empty() {
-        GroverOracle::multi(3, &[]);
+        IndexOracle::multi(3, &[]);
     }
 
     #[test]
     #[should_panic(expected = "target 8 out of range")]
     fn test_multi_target_panics_on_invalid() {
-        GroverOracle::multi(3, &[1, 8]);
+        IndexOracle::multi(3, &[1, 8]);
     }
 
     #[test]
@@ -558,5 +678,58 @@ mod tests {
         assert_eq!(config.num_qubits, 3);
         assert_eq!(config.num_iterations, None);
         assert_eq!(config.num_shots, 100);
+    }
+
+    /// IterationsRequired error when oracle has no num_solutions.
+    #[test]
+    fn test_iterations_required_error() {
+        struct UnknownOracle;
+        impl Oracle for UnknownOracle {
+            fn num_data_qubits(&self) -> usize {
+                2
+            }
+            fn num_ancillas(&self) -> usize {
+                0
+            }
+            fn num_solutions(&self) -> Option<NonZeroUsize> {
+                None
+            }
+            fn apply(&self, _: &mut Circuit, _: &[usize], _: &[usize]) {}
+        }
+        let config = GroverConfig {
+            num_qubits: 2,
+            num_shots: 10,
+            num_iterations: None,
+        };
+        let result = try_search_with_oracle(&config, &UnknownOracle, &test_runner);
+        assert!(matches!(result, Err(GroverError::IterationsRequired)));
+    }
+
+    /// Oracle trait works with explicit iterations even when num_solutions is None.
+    #[test]
+    fn test_oracle_trait_with_explicit_iterations() {
+        struct UnknownOracle;
+        impl Oracle for UnknownOracle {
+            fn num_data_qubits(&self) -> usize {
+                2
+            }
+            fn num_ancillas(&self) -> usize {
+                0
+            }
+            fn num_solutions(&self) -> Option<NonZeroUsize> {
+                None
+            }
+            fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], _: &[usize]) {
+                // Mark state |3⟩ = |11⟩ — just MCZ on both qubits
+                *circuit += ControlledPauliZ::new(data_qubits[0], data_qubits[1]);
+            }
+        }
+        let config = GroverConfig {
+            num_qubits: 2,
+            num_iterations: Some(1),
+            num_shots: 50,
+        };
+        let result = try_search_with_oracle(&config, &UnknownOracle, &test_runner).unwrap();
+        assert_eq!(result.measured_state, 3);
     }
 }

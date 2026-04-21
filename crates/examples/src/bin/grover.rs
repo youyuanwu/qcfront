@@ -3,7 +3,7 @@
 //! Searches for a random target in N=8 (3 qubits) and demonstrates
 //! multi-target search in N=4 (2 qubits).
 
-use algos::grover::{search, search_with_oracle, GroverConfig, GroverOracle};
+use algos::grover::{search, try_search_with_oracle, GroverConfig, IndexOracle};
 use examples::quest_runner::QuestRunner;
 
 fn main() {
@@ -37,13 +37,13 @@ fn main() {
     // --- Multi-target search (N=8, find one of {2, 5}) ---
     println!("\n--- 3 qubits: searching N=8 for targets={{2, 5}} ---");
 
-    let oracle = GroverOracle::multi(3, &[2, 5]);
+    let oracle = IndexOracle::multi(3, &[2, 5]);
     let config_multi = GroverConfig {
         num_qubits: 3,
         num_shots: 100,
         ..Default::default()
     };
-    let result_multi = search_with_oracle(&config_multi, &oracle, &runner);
+    let result_multi = try_search_with_oracle(&config_multi, &oracle, &runner).unwrap();
 
     println!(
         "  Found: {} (probability {:.1}%, {} iterations)",

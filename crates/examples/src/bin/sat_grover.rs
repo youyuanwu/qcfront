@@ -1,10 +1,11 @@
 //! Solve a SAT problem using Grover's quantum search.
 //!
-//! Demonstrates the full pipeline: CNF formula → SAT oracle → Grover search
-//! → satisfying assignment.
+//! Demonstrates the full pipeline: CNF formula → CnfOracle (reversible
+//! circuit evaluation) → Grover search → satisfying assignment.
+//! Uses SatOracle.evaluate() for classical verification only.
 
-use algos::grover::{search_with_oracle, GroverConfig};
-use algos::sat::{sat_oracle, Literal};
+use algos::grover::{try_search_with_oracle, GroverConfig};
+use algos::sat::{evaluate_cnf, CnfOracle, Literal};
 use examples::quest_runner::QuestRunner;
 
 fn main() {
@@ -21,14 +22,16 @@ fn main() {
     println!("Formula: (x₁) ∧ (x₂ ∨ x₃) ∧ (¬x₂ ∨ x₃)");
     println!("Variables: {}, Search space: {}\n", num_vars, 1 << num_vars);
 
-    // Build SAT oracle and find solutions classically (for verification)
-    let sat = sat_oracle(num_vars, &clauses);
-    let grover_oracle = sat.to_grover_oracle();
-    let m = grover_oracle.num_solutions();
-
-    println!("Classical analysis: {} satisfying assignment(s)", m);
+    // Classical verification
+    let num_solutions = (0..(1 << num_vars))
+        .filter(|&i| evaluate_cnf(&clauses, i))
+        .count();
+    println!(
+        "Classical analysis: {} satisfying assignment(s)",
+        num_solutions
+    );
     for i in 0..(1 << num_vars) {
-        if sat.evaluate(i) {
+        if evaluate_cnf(&clauses, i) {
             let bits: String = (0..num_vars)
                 .map(|b| if (i >> b) & 1 == 1 { '1' } else { '0' })
                 .collect();
@@ -36,15 +39,19 @@ fn main() {
         }
     }
 
-    // Run Grover's search
-    println!("\nRunning Grover's search...");
+    // Build circuit-based oracle (no classical pre-solving!)
+    let cnf_oracle = CnfOracle::new(num_vars, &clauses);
+
+    // Run Grover's search — must provide iteration count since CnfOracle
+    // doesn't know M (that's the whole point of quantum search)
+    println!("\nRunning Grover's search (CnfOracle, circuit-based)...");
     let runner = QuestRunner;
     let config = GroverConfig {
         num_qubits: num_vars,
+        num_iterations: Some(1), // k=1 works well for M=2, N=8
         num_shots: 100,
-        ..Default::default()
     };
-    let result = search_with_oracle(&config, &grover_oracle, &runner);
+    let result = try_search_with_oracle(&config, &cnf_oracle, &runner).unwrap();
 
     let bits: String = (0..num_vars)
         .map(|b| {
@@ -64,7 +71,7 @@ fn main() {
         result.num_iterations,
     );
 
-    if sat.evaluate(result.measured_state) {
+    if evaluate_cnf(&clauses, result.measured_state) {
         println!("  ✓ Satisfying assignment found!");
     } else {
         println!("  ✗ Not a satisfying assignment");
@@ -79,7 +86,11 @@ fn main() {
             .map(|b| if (*state >> b) & 1 == 1 { '1' } else { '0' })
             .collect();
         let bar: String = "█".repeat(**count);
-        let marker = if sat.evaluate(**state) { " ✓" } else { "" };
+        let marker = if evaluate_cnf(&clauses, **state) {
+            " ✓"
+        } else {
+            ""
+        };
         println!("  |{}⟩ = {:2}: {}{}", label, count, bar, marker);
     }
 }

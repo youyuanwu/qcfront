@@ -12,14 +12,22 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+/// Number of ancilla qubits required by [`build_multi_cx`] for `nc` controls.
+pub fn required_ancillas(nc: usize) -> usize {
+    if nc >= 3 {
+        nc - 2
+    } else {
+        0
+    }
+}
+
 /// Build a multi-controlled-X gate: flip `target` if all `controls` are |1⟩.
 ///
 /// # Arguments
 /// * `target` — qubit whose value is flipped
 /// * `controls` — qubits that must all be |1⟩ for the flip (len ≥ 1)
 /// * `ancillas` — scratch qubits initialized to |0⟩; must have
-///   `ancillas.len() == max(0, controls.len() - 2)` for 3+ controls,
-///   or be empty for 1–2 controls.
+///   `ancillas.len() == required_ancillas(controls.len())`.
 ///
 /// # Panics
 /// Panics if `controls` is empty or if the ancilla count doesn't match.
@@ -27,7 +35,7 @@ pub fn build_multi_cx(target: usize, controls: &[usize], ancillas: &[usize]) -> 
     let nc = controls.len();
     assert!(nc >= 1, "build_multi_cx requires at least 1 control");
 
-    let expected_ancillas = if nc >= 3 { nc - 2 } else { 0 };
+    let expected_ancillas = required_ancillas(nc);
     debug_assert_eq!(
         ancillas.len(),
         expected_ancillas,

@@ -1,150 +1,149 @@
-# Feature: Grover's Search Algorithm in Rust
+# Feature: Grover's Search Algorithm
 
-## Goal
-
-Implement Grover's quantum search algorithm in Rust using roqoqo, capable of finding
-marked items in an unstructured search space of N = 2ⁿ items in O(√N) queries.
+For the theory (how the algorithm works, why it's fast), see
+[docs/theory/Grover.md](../theory/Grover.md).
 
 ## Status
 
-**Phase 1 (Core n ≤ 3) ✅** — `algos/src/grover.rs`: `search()`, `GroverConfig`/`GroverResult`.
+**Phase 1 (Core) ✅** — `algos/src/grover.rs`: `search()`,
+`GroverConfig`, `GroverResult`.
 
-**Phase 2 (Scaling n ≥ 4) ✅** — `algos/src/circuits/multi_cz.rs`: Barenco V-chain for
-arbitrary n. CCZ convention verified.
+**Phase 2 (Scaling n ≥ 4) ✅** — `algos/src/circuits/multi_cz.rs`:
+Barenco V-chain decomposition with `required_ancillas()` helper.
 
-**Phase 3 (General Oracle Framework) ✅** — `GroverOracle` struct with `single()`/`multi()`,
-`search_with_oracle()`, `success: Option<bool>`, multi-target dedup, M-aware iteration count.
+**Phase 3 (Oracle Trait) ✅** — `Oracle` trait with `IndexOracle`
+(marks by index) and `CnfOracle` (reversible SAT circuit).
+`try_search_with_oracle()` returns `Result`.
 
-**Phase 4 (SAT Solver) ✅** — `algos/src/sat.rs`: `Literal` newtype, `SatOracle`,
-`circuits/multi_cx.rs`: multi-controlled-X. Full pipeline: CNF → Grover → satisfying assignment.
+**Phase 4 (SAT Solver) ✅** — `algos/src/sat.rs`: `CnfOracle` with
+De Morgan circuit construction, clause canonicalization,
+`evaluate_cnf()` free function. `circuits/multi_cx.rs` for MCX.
 
-- `examples/src/bin/grover.rs` — single-target and multi-target search demos.
-- `examples/src/bin/sat_grover.rs` — solves (x₁) ∧ (x₂ ∨ x₃) ∧ (¬x₂ ∨ x₃) via Grover.
-- 68 tests total across workspace.
+## Public API
 
-## Algorithm Overview
+### Oracle Trait
 
-Grover's algorithm searches an unsorted database of N = 2ⁿ items for a marked element
-in O(√N) queries, a quadratic speedup over classical O(N) search.
-
-```
-INPUT: N = 2^n (search space size), oracle f(x) that marks solutions
-
-1. INITIALIZE:  |0⟩^⊗n → H^⊗n → equal superposition |s⟩ = (1/√N) Σ|x⟩
-2. REPEAT k ≈ ⌊(π/4)√(N/M)⌋ times (M = number of solutions):
-   a. ORACLE:    flip phase of marked states  |x⟩ → (-1)^f(x) |x⟩
-   b. DIFFUSER:  reflect about the mean       2|s⟩⟨s| - I
-3. MEASURE:     observe the marked state with probability ≈ 1
+```rust
+pub trait Oracle {
+    fn num_data_qubits(&self) -> usize;
+    fn num_ancillas(&self) -> usize;
+    fn num_solutions(&self) -> Option<NonZeroUsize>;
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]);
+}
 ```
 
-Each Grover iteration rotates the state vector toward the solution subspace by
-θ = arcsin(√(M/N)). After k iterations the success probability is sin²((2k+1)θ).
+Phase oracle invariant: `O|x⟩|0⟩ = (-1)^f(x)|x⟩|0⟩`. Ancillas must
+be restored to |0⟩ after each application. See trait doc for full
+contract.
 
-### Key Formulas
+### Implementations
 
-| Formula | Meaning |
-|---|---|
-| k = ⌊(π/4) × √(N/M)⌋ | Optimal number of Grover iterations |
-| P(success) = sin²((2k+1)θ), sin θ = √(M/N) | Probability of measuring a solution |
-| N = 2ⁿ | Search space size for n qubits |
+| Type | Marks by | `num_solutions()` | Use case |
+|------|----------|:---:|----------|
+| `IndexOracle` | State index (X+MCZ+X per target) | `Some(m)` | Testing, known targets |
+| `CnfOracle` | Reversible CNF evaluation | `None` | SAT solving, quantum advantage |
 
-When M > 1 solutions exist, optimal iterations decrease: k ≈ (π/4)√(N/M).
-If M is unknown, use exponential search: try k = 1, 2, 4, 8, … until measurement
-succeeds. Expected total queries: O(√(N/M)).
+### Search Functions
 
-## Circuit Decomposition
+```rust
+// Simple: search for a known target
+let result = search(&config, target, &runner);
 
-### Oracle (Phase Flip for Target |t⟩)
-
-```
-1. For each qubit i where bit i of t is 0: apply X(i)
-2. Apply multi-controlled-Z on all n qubits
-3. Undo the X gates from step 1
+// Generic: any Oracle, returns Result
+let result = try_search_with_oracle(&config, &oracle, &runner)?;
 ```
 
-This maps |t⟩ → |11…1⟩, applies the phase flip, then restores the encoding.
+### SAT Utilities
 
-### Diffuser
+```rust
+// Build circuit-based oracle (no classical pre-solving)
+let oracle = CnfOracle::new(num_vars, &clauses);
 
-The diffuser reflects the state about |s⟩. The H-X-MCZ-X-H circuit implements
-−(2|s⟩⟨s| − I) = I − 2|s⟩⟨s|, which differs from 2|s⟩⟨s| − I by a global phase
-of −1 (unobservable). This works because MCZ = I − 2|1…1⟩⟨1…1|, so
-X⊗n·MCZ·X⊗n = I − 2|0…0⟩⟨0…0|, and sandwiching with H⊗n gives I − 2|s⟩⟨s|.
-
-### Multi-Controlled-Z / Multi-Controlled-X
-
-Both the oracle and diffuser require an n-qubit controlled-Z gate (phase flip of |11…1⟩).
-The SAT oracle additionally needs multi-controlled-X (bit flip, generalized Toffoli).
-roqoqo provides native gates up to 3 qubits:
-
-| n | MCZ gate | MCX gate |
-|---|---|---|
-| 1 | `PauliZ` | `PauliX` |
-| 2 | `ControlledPauliZ` | `CNOT` |
-| 3 | `ControlledControlledPauliZ` | `Toffoli` |
-| 4+ | V-chain: 2(n−2) Toffoli + 1 CZ | V-chain: 2(n−2) Toffoli + 1 CNOT |
-
-Both decompositions use n−2 ancilla qubits and rely on the Toffoli self-inverse
-property for uncomputation. CCZ is symmetric (argument order irrelevant).
-
-**Qubit layout:** n data qubits + max(0, n−2) ancillas. Practical cutoff: ~n=15
-(q=28 → ~2 GB memory).
-
-## SAT Oracle Circuit Construction
-
-Each CNF clause is evaluated using De Morgan's law: `a OR b = NOT(NOT a AND NOT b)`.
-Results are stored in clause ancilla qubits using multi-controlled-X (not MCZ — clause
-evaluation flips bit values, not phases).
-
-For clause (x₁ OR x₂): negate inputs → Toffoli into clause ancilla → restore → flip.
-For clause (¬x₁ OR x₃): negate non-negated inputs → Toffoli → restore → flip.
-
-Clause results are ANDed via Toffoli into a sat ancilla. PauliZ on the (entangled) sat
-ancilla produces the phase flip via standard phase kickback: (-1)^f(x) on each branch.
-All workspace qubits are uncomputed in reverse order.
-
-The current implementation uses classical brute-force to enumerate solutions for small
-instances, then creates a `GroverOracle::multi`. A fully circuit-based oracle (building
-the De Morgan gates directly) is a future enhancement.
-
-## How qpp Implements Grover (State-Vector, Not Gates)
-
-qpp's `grover.cpp` uses direct state-vector manipulation:
-
-```cpp
-psi(marked) = -psi(marked);                   // Oracle: direct amplitude flip
-cmat G = 2 * prj(psi_initial) - gt.Id(N);     // Diffuser: dense N×N matrix
-psi = (G * psi).eval();
+// Classical verification of results
+let is_sat = evaluate_cnf(&clauses, assignment);
 ```
 
-| Aspect | qpp (state-vector) | roqoqo (gate-based) |
-|---|---|---|
-| Oracle | Direct amplitude flip | X gates + multi-CZ + X gates |
-| Diffuser | Dense N×N matrix multiply | H + X + multi-CZ + X + H |
-| Cost per iteration | O(N²) = O(4ⁿ) time | O(n) gates, each O(2^q) in simulation |
-| Memory | O(4ⁿ) (precomputed G + state) | O(2^q) (state vector only) |
-| Hardware-realistic | No | Gate-level (all-to-all connectivity assumed) |
+`CnfOracle::new()` canonicalizes clauses: deduplicates literals, drops
+tautological clauses (`x ∨ ¬x`).
 
-## roqoqo Gate Convention Notes
+## Architecture
 
-- **`Toffoli::new(target, ctrl1, ctrl2)`** — first argument is the **target**
-- **`ControlledControlledPauliZ::new(q0, q1, q2)`** — symmetric (order irrelevant)
-- See ShorFactoring.md for the Toffoli convention lesson and Fredkin decomposition
+```
+search() ─────────────────────────────┐
+try_search_with_oracle<O: Oracle>() ──┤
+                                      ▼
+                        build_grover_circuit()
+                              │
+            ┌─────────────────┼──────────────────┐
+            ▼                 ▼                  ▼
+    H on all qubits    oracle.apply()    build_diffuser()
+                       │                 │
+                       ▼                 ▼
+                IndexOracle:         H·X·MCZ·X·H
+                  X+MCZ+X
+                CnfOracle:
+                  De Morgan circuit
+```
 
-## Applications
+### Qubit Layout (disjoint pools)
 
-- **Unstructured search**: Find a specific item among N possibilities in O(√N)
-- **Cryptographic key search**: Reduce brute-force key space from 2ⁿ to 2^(n/2)
-- **SAT solving**: Search for satisfying assignments (with appropriate oracle)
-- **Amplitude amplification**: General technique — boost success probability of any
-  quantum subroutine (Grover is a special case)
+```
+|← data (n) →|← diffuser MCZ (d) →|← oracle ancillas (a) →|
+  qubits 0..n     qubits n..n+d        qubits n+d..n+d+a
+```
 
-## References
+The diffuser and oracle each get their own MCZ/MCX scratch qubits.
+No sharing — clear ownership, no ambiguity.
 
-- qpp grover.cpp: <https://github.com/softwareQinc/qpp/blob/main/examples/grover.cpp>
-- Grover, "A Fast Quantum Mechanical Algorithm for Database Search", 1996:
-  <https://arxiv.org/abs/quant-ph/9605043>
-- Barenco et al., "Elementary gates for quantum computation", 1995:
-  <https://arxiv.org/abs/quant-ph/9503016> (multi-controlled gate decomposition)
-- Nielsen & Chuang, Section 6.1–6.2: Grover's algorithm
-- roqoqo gate docs: <https://hqsquantumsimulations.github.io/qoqo/gate_operations/multi_qubit_gates.html>
+### CnfOracle Ancilla Budget
+
+```
+clause_ancillas = c
+mcx_scratch     = max over clauses of required_ancillas(clause.len())
+final_mcz       = required_ancillas(c)
+total           = c + max(mcx_scratch, final_mcz)
+```
+
+MCX scratch reuses across sequential clauses. MCZ scratch reuses the
+same pool (non-overlapping temporally).
+
+## Files
+
+| File | Contents |
+|------|----------|
+| `crates/algos/src/grover.rs` | `Oracle` trait, `IndexOracle`, `GroverConfig/Result/Error`, `search`, `try_search_with_oracle` |
+| `crates/algos/src/sat.rs` | `Literal`, `CnfOracle`, `evaluate_cnf` |
+| `crates/algos/src/circuits/multi_cz.rs` | `build_multi_cz`, `required_ancillas` |
+| `crates/algos/src/circuits/multi_cx.rs` | `build_multi_cx`, `required_ancillas` |
+| `crates/examples/src/bin/grover.rs` | Single-target and multi-target demos |
+| `crates/examples/src/bin/sat_grover.rs` | CNF SAT → CnfOracle → Grover |
+
+## Tests (124 total across workspace)
+
+- Grover: 2-qubit (all targets), 3-qubit, explicit iterations,
+  custom Oracle trait, IterationsRequired error
+- IndexOracle: single/multi, dedup, panics (range, empty, shots)
+- CnfOracle: evaluation, canonicalization, ancilla budget, Grover
+  integration (single + multi-solution SAT)
+- MCZ/MCX: 1–5 qubit decomposition, ancilla uncomputation, CCZ symmetry
+
+## roqoqo Gate Conventions
+
+- `Toffoli::new(target, ctrl1, ctrl2)` — first arg is **target**
+- `ControlledControlledPauliZ::new(q0, q1, q2)` — symmetric
+- `CNOT::new(control, target)` — standard ordering
+
+## Open Questions
+
+- **Ancilla sharing**: Disjoint pools waste qubits for `IndexOracle`
+  (duplicates diffuser MCZ scratch). A shared pool of
+  `max(diffuser, oracle)` would suffice. Trade-off: clarity vs qubits.
+
+- **Unsatisfiable formulas**: `CnfOracle` on UNSAT produces
+  near-uniform distribution with no error signal. Consider
+  `GroverResult::is_likely_unsatisfiable()`.
+
+- **Variable density**: `Literal::qubit()` assumes dense 1..=num_vars.
+  Sparse DIMACS needs a remapping pass.
+
+- **Unit propagation**: Not implemented. Separable optimization.
