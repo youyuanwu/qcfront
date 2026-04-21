@@ -7,18 +7,54 @@
 
 use crate::grover::GroverOracle;
 
-/// A literal in a CNF clause. 1-indexed variables, sign indicates polarity.
+/// A literal in a CNF clause.
 ///
-/// - `Literal(1)` = x₁ (positive)
-/// - `Literal(-2)` = ¬x₂ (negated)
-/// - Variable 0 is invalid (0 == -0 has no polarity)
+/// Represents a boolean variable or its negation. Use [`Literal::pos`]
+/// and [`Literal::neg`] to construct. Variables are 1-indexed.
+///
+/// # Examples
+/// ```
+/// use algos::sat::Literal;
+/// let x1 = Literal::pos(1);       // x₁
+/// let not_x2 = Literal::neg(2);   // ¬x₂
+/// assert!(!x1.is_negated());
+/// assert!(not_x2.is_negated());
+/// assert_eq!(not_x2.var(), 2);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Literal(pub i32);
+pub struct Literal(i32);
 
 impl Literal {
-    /// Variable index (1-based). Panics if literal is 0.
+    /// Positive literal (variable appears un-negated).
+    ///
+    /// # Panics
+    /// If `var` is 0.
+    pub fn pos(var: usize) -> Self {
+        assert!(var > 0, "variable must be >= 1, got 0");
+        Self(var as i32)
+    }
+
+    /// Negative literal (variable is negated).
+    ///
+    /// # Panics
+    /// If `var` is 0.
+    pub fn neg(var: usize) -> Self {
+        assert!(var > 0, "variable must be >= 1, got 0");
+        Self(-(var as i32))
+    }
+
+    /// Construct from DIMACS-style signed integer.
+    /// Positive = un-negated, negative = negated.
+    ///
+    /// # Panics
+    /// If `val` is 0.
+    pub fn from_dimacs(val: i32) -> Self {
+        assert!(val != 0, "literal 0 is invalid (no polarity)");
+        Self(val)
+    }
+
+    /// Variable index (1-based).
     pub fn var(&self) -> usize {
-        assert!(self.0 != 0, "Literal 0 is invalid (no polarity)");
         self.0.unsigned_abs() as usize
     }
 
@@ -68,11 +104,6 @@ pub fn sat_oracle(num_vars: usize, clauses: &[Clause]) -> SatOracle {
             ci
         );
         for lit in clause {
-            assert!(
-                lit.0 != 0,
-                "clause {} contains literal 0 (invalid: no polarity)",
-                ci
-            );
             assert!(
                 lit.var() <= num_vars,
                 "clause {} references variable {} but num_vars={}",
@@ -175,8 +206,8 @@ mod tests {
     #[test]
     fn test_evaluate_2sat() {
         let clauses = vec![
-            vec![Literal(1), Literal(2)],  // x₁ OR x₂
-            vec![Literal(-1), Literal(3)], // ¬x₁ OR x₃
+            vec![Literal::pos(1), Literal::pos(2)], // x₁ OR x₂
+            vec![Literal::neg(1), Literal::pos(3)], // ¬x₁ OR x₃
         ];
         let oracle = sat_oracle(3, &clauses);
 
@@ -202,7 +233,10 @@ mod tests {
     /// Test to_grover_oracle finds correct solutions.
     #[test]
     fn test_to_grover_oracle() {
-        let clauses = vec![vec![Literal(1), Literal(2)], vec![Literal(-1), Literal(3)]];
+        let clauses = vec![
+            vec![Literal::pos(1), Literal::pos(2)],
+            vec![Literal::neg(1), Literal::pos(3)],
+        ];
         let sat = sat_oracle(3, &clauses);
         let grover_oracle = sat.to_grover_oracle();
         assert_eq!(grover_oracle.num_solutions(), 4);
@@ -213,8 +247,8 @@ mod tests {
     #[test]
     fn test_sat_grover_pipeline() {
         let clauses = vec![
-            vec![Literal(1)],             // x₁
-            vec![Literal(2), Literal(3)], // x₂ OR x₃
+            vec![Literal::pos(1)],                  // x₁
+            vec![Literal::pos(2), Literal::pos(3)], // x₂ OR x₃
         ];
         let sat = sat_oracle(3, &clauses);
         let grover_oracle = sat.to_grover_oracle();
@@ -242,8 +276,8 @@ mod tests {
     #[test]
     fn test_sat_single_solution() {
         let clauses = vec![
-            vec![Literal(1)],              // x₁
-            vec![Literal(-1), Literal(2)], // ¬x₁ OR x₂
+            vec![Literal::pos(1)],                  // x₁
+            vec![Literal::neg(1), Literal::pos(2)], // ¬x₁ OR x₂
         ];
         let sat = sat_oracle(2, &clauses);
         let grover_oracle = sat.to_grover_oracle();
@@ -261,7 +295,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "num_vars must be >= 2")]
     fn test_sat_panics_small_vars() {
-        sat_oracle(1, &[vec![Literal(1)]]);
+        sat_oracle(1, &[vec![Literal::pos(1)]]);
     }
 
     #[test]
@@ -277,14 +311,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "contains literal 0")]
+    #[should_panic(expected = "literal 0 is invalid")]
     fn test_sat_panics_literal_zero() {
-        sat_oracle(2, &[vec![Literal(0)]]);
+        Literal::from_dimacs(0);
     }
 
     #[test]
     #[should_panic(expected = "references variable 5 but num_vars=3")]
     fn test_sat_panics_out_of_range() {
-        sat_oracle(3, &[vec![Literal(5)]]);
+        sat_oracle(3, &[vec![Literal::pos(5)]]);
     }
 }

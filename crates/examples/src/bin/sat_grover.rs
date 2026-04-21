@@ -12,9 +12,9 @@ fn main() {
 
     // Define CNF formula: (x₁) AND (x₂ OR x₃) AND (¬x₂ OR x₃)
     let clauses = vec![
-        vec![Literal(1)],              // x₁ must be true
-        vec![Literal(2), Literal(3)],  // x₂ OR x₃
-        vec![Literal(-2), Literal(3)], // ¬x₂ OR x₃
+        vec![Literal::pos(1)],                  // x₁ must be true
+        vec![Literal::pos(2), Literal::pos(3)], // x₂ OR x₃
+        vec![Literal::neg(2), Literal::pos(3)], // ¬x₂ OR x₃
     ];
     let num_vars = 3;
 
