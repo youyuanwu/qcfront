@@ -8,6 +8,7 @@ algos = { path = "../algos" }
 roqoqo.workspace = true
 roqoqo-quest.workspace = true
 roqoqo-qir.workspace = true
+num-complex.workspace = true
 qoqo_calculator.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

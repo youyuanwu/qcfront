@@ -14,6 +14,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::modmul_15::controlled_modmul_15;
 use crate::math::{convergents, mod_pow, random_coprime};
+use crate::qpe::{bits_to_int_lsb, bits_to_int_msb, build_qpe_circuit};
 use crate::runner::QuantumRunner;
 
 /// Configuration for Shor's factoring algorithm.
@@ -167,34 +168,17 @@ pub(crate) fn build_order_finding_circuit(a: u64, n: u64) -> (Circuit, usize) {
     let n_counting = 2 * n_bits; // 8 counting qubits
     let work: [usize; 4] = [n_counting, n_counting + 1, n_counting + 2, n_counting + 3];
 
+    // Initialize work register to |1⟩, then delegate to QPE
     let mut circuit = Circuit::new();
-    circuit += DefinitionBit::new("counting".to_string(), n_counting, true);
-
-    // 1. Initialize work register to |1⟩ (LSB of work register)
     circuit += PauliX::new(work[0]);
 
-    // 2. Hadamard on all counting qubits → equal superposition
-    for i in 0..n_counting {
-        circuit += Hadamard::new(i);
-    }
-
-    // 3. Controlled modular exponentiations:
-    //    counting qubit k controls multiplication by a^(2^k) mod n
-    for k in 0..n_counting {
+    let qpe = build_qpe_circuit(n_counting, &work, |circ, ctrl, k| {
         let power = mod_pow(a, 1u64 << k, n);
         if power != 1 {
-            controlled_modmul_15(&mut circuit, power, k, work);
+            controlled_modmul_15(circ, power, ctrl, work);
         }
-    }
-
-    // 4. Inverse QFT on counting register
-    let counting_qubits: Vec<usize> = (0..n_counting).collect();
-    circuit += QFT::new(counting_qubits, true, true);
-
-    // 5. Measure counting register
-    for i in 0..n_counting {
-        circuit += MeasureQubit::new(i, "counting".to_string(), i);
-    }
+    });
+    circuit += qpe;
 
     (circuit, n_counting)
 }
@@ -262,22 +246,6 @@ pub(crate) fn find_factors(n: u64, a: u64, r: u64) -> Option<(u64, u64)> {
     } else {
         None
     }
-}
-
-/// Convert measurement bits to integer (bit 0 = LSB).
-fn bits_to_int_lsb(bits: &[bool]) -> u64 {
-    bits.iter()
-        .enumerate()
-        .fold(0u64, |acc, (i, &b)| if b { acc | (1 << i) } else { acc })
-}
-
-/// Convert measurement bits to integer (bit 0 = MSB).
-fn bits_to_int_msb(bits: &[bool]) -> u64 {
-    let n = bits.len();
-    bits.iter().enumerate().fold(
-        0u64,
-        |acc, (i, &b)| if b { acc | (1 << (n - 1 - i)) } else { acc },
-    )
 }
 
 #[cfg(test)]

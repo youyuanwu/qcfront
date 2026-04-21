@@ -7,6 +7,46 @@
 use roqoqo::Circuit;
 use std::collections::HashMap;
 
+/// Result of measuring a single qubit: collapsed to |0⟩ or |1⟩.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bit {
+    Zero,
+    One,
+}
+
+impl Bit {
+    /// Convert from a raw measurement bool (roqoqo convention: false=0, true=1).
+    pub fn from_bool(b: bool) -> Self {
+        if b {
+            Bit::One
+        } else {
+            Bit::Zero
+        }
+    }
+
+    /// Whether this is |1⟩.
+    pub fn is_one(self) -> bool {
+        self == Bit::One
+    }
+
+    /// Whether this is |0⟩.
+    pub fn is_zero(self) -> bool {
+        self == Bit::Zero
+    }
+}
+
+impl From<bool> for Bit {
+    fn from(b: bool) -> Self {
+        Bit::from_bool(b)
+    }
+}
+
+impl From<Bit> for bool {
+    fn from(b: Bit) -> Self {
+        b.is_one()
+    }
+}
+
 /// Measurement results: register name → shots × bits.
 pub type BitRegisters = HashMap<String, Vec<Vec<bool>>>;
 
