@@ -275,6 +275,72 @@ circuit += DefinitionComplex::new("sv".to_string(), dim, true);
 circuit += PragmaGetStateVector::new("sv".to_string(), None);
 ```
 
+## Ancilla Qubits
+
+An **ancilla** (Latin: "servant") is a helper qubit added to a circuit
+that doesn't hold input or output data. Ancillas serve as scratch space
+for computations that can't be done directly on the data qubits.
+
+### Why ancillas are needed
+
+Quantum gates are reversible — every gate has an inverse. But many
+useful operations (like AND, OR, multi-controlled gates) are
+irreversible classically. To make them reversible for a quantum circuit,
+we store intermediate results in ancilla qubits and **uncompute** them
+afterward.
+
+Example: a 5-qubit controlled-Z can't be built from 1- and 2-qubit
+gates alone. The V-chain decomposition uses 3 ancilla qubits as a
+"Toffoli ladder" to cascade the AND of controls:
+
+```
+controls: ─●──●─────────────────●──●─
+           │  │                 │  │
+           ├──┤                 ├──┤
+controls: ─●──┼──●──────────●──┼──●─
+              │  │          │  │
+ancilla₀: ───⊕──●──────────●──⊕─── (back to |0⟩)
+              │  │          │  │
+ancilla₁: ──────⊕──●────●──⊕────── (back to |0⟩)
+                    │    │
+ancilla₂: ─────────⊕─CZ─⊕──────── (back to |0⟩)
+                      │
+target:   ────────────●──────────── (phase flipped)
+           forward    ↑   reverse
+           pass      gate  pass
+```
+
+### The golden rule: clean up after yourself
+
+Ancillas must be returned to |0⟩ after use. If an ancilla is left
+entangled with the data qubits, subsequent operations (like the
+diffuser in Grover's algorithm) will act on the wrong subspace,
+silently producing wrong results.
+
+The standard pattern is **compute → use → uncompute**:
+1. **Compute**: fill ancillas with intermediate results
+2. **Use**: apply the target operation (e.g., phase flip)
+3. **Uncompute**: run the compute steps in reverse to erase ancillas
+
+Since every quantum gate is its own inverse or has a known inverse,
+uncomputation is always possible — just replay the gates backward.
+
+### Common uses in qcfront
+
+| Where | Ancilla purpose | Count |
+|-------|----------------|:---:|
+| `build_multi_cz` | Toffoli V-chain for n-qubit CZ | max(0, n−2) |
+| `build_multi_cx` | Toffoli V-chain for n-qubit CNOT | max(0, n−2) |
+| `CnfOracle` | Clause evaluation + MCZ/MCX scratch | c + max(mcx, mcz) |
+| Grover diffuser | Shares MCZ pattern with oracle | max(0, n−2) |
+
+### Ancilla vs workspace vs scratch
+
+These terms are used interchangeably in the literature. In qcfront:
+- **ancilla** = any non-data qubit
+- The Oracle trait's `num_ancillas()` reports total scratch needed
+- The driver allocates ancillas and passes them via `apply()`
+
 ## Gate Universality
 
 Any quantum computation can be built from:

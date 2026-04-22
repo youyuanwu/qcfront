@@ -82,24 +82,28 @@ impl Literal {
 /// A CNF clause: disjunction (OR) of literals.
 pub type Clause = Vec<Literal>;
 
-/// Build a Grover oracle for a CNF SAT formula.
-///
-/// The oracle flips the phase of computational basis states that satisfy
-/// all clauses. It uses workspace qubits for clause evaluation and
-/// uncomputes them after the phase flip.
-///
-/// # Arguments
-/// * `num_vars` — number of boolean variables (≥ 2, mapped to data qubits)
-/// * `clauses` — CNF formula: conjunction (AND) of clauses
-/// * `num_iterations` — number of Grover iterations (required since M is unknown)
-///
 /// Evaluate a CNF formula classically for a given bit assignment.
 ///
-/// Each clause is a disjunction (OR) of literals; the formula is the
-/// conjunction (AND) of all clauses. Assignment bits are LSB-first:
-/// bit 0 = variable 1, bit 1 = variable 2, etc.
+/// Returns `true` if `assignment` satisfies every clause. Each clause
+/// is an OR of [`Literal`]s; the formula is the AND of all clauses.
 ///
-/// Useful for verifying quantum search results against the ground truth.
+/// Bit ordering is LSB-first: bit 0 → variable 1, bit 1 → variable 2, etc.
+/// This matches the qubit ordering used by [`CnfOracle`] and Grover's
+/// measurement output.
+///
+/// # Example
+/// ```
+/// use algos::sat::{evaluate_cnf, Literal};
+///
+/// // (x₁) ∧ (¬x₁ ∨ x₂)  — only x₁=1,x₂=1 satisfies
+/// let clauses = vec![
+///     vec![Literal::pos(1)],
+///     vec![Literal::neg(1), Literal::pos(2)],
+/// ];
+/// assert!(!evaluate_cnf(&clauses, 0b00));  // x₁=0,x₂=0
+/// assert!(!evaluate_cnf(&clauses, 0b01));  // x₁=1,x₂=0
+/// assert!(evaluate_cnf(&clauses, 0b11));   // x₁=1,x₂=1
+/// ```
 pub fn evaluate_cnf(clauses: &[Clause], assignment: usize) -> bool {
     clauses.iter().all(|clause| {
         clause.iter().any(|lit| {
@@ -117,12 +121,11 @@ pub fn evaluate_cnf(clauses: &[Clause], assignment: usize) -> bool {
 // CnfOracle — circuit-based SAT oracle (implements Oracle trait)
 // ---------------------------------------------------------------------------
 
-/// Circuit-based SAT oracle using reversible De Morgan decomposition.
+/// Circuit-based SAT oracle using per-clause De Morgan evaluation.
 ///
-/// Unlike [`SatOracle::to_grover_oracle`], this does NOT classically
-/// enumerate solutions. It builds a quantum circuit that evaluates the
-/// CNF formula on a superposition of all assignments, providing genuine
-/// quantum advantage for Grover's search.
+/// Builds a quantum circuit that evaluates the CNF formula on a
+/// superposition of all assignments, providing genuine quantum
+/// advantage for Grover's search. No classical pre-solving.
 ///
 /// The constructor canonicalizes each clause:
 /// - Deduplicates identical literals within a clause
@@ -136,7 +139,7 @@ pub struct CnfOracle {
     num_vars: usize,
     /// Canonicalized clauses: each inner Vec contains unique Literals,
     /// no clause contains both x and ¬x.
-    clauses: Vec<Vec<Literal>>,
+    clauses: Vec<Clause>,
 }
 
 impl CnfOracle {
@@ -213,11 +216,6 @@ impl CnfOracle {
     pub fn num_clauses(&self) -> usize {
         self.clauses.len()
     }
-
-    /// Evaluate the CNF formula classically for a given assignment.
-    pub fn evaluate(&self, assignment: usize) -> bool {
-        evaluate_cnf(&self.clauses, assignment)
-    }
 }
 
 impl Oracle for CnfOracle {
@@ -245,8 +243,102 @@ impl Oracle for CnfOracle {
     }
 
     fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+        // ===================================================================
+        // What this circuit does
+        // ===================================================================
+        //
+        // Grover's algorithm calls this oracle on a SUPERPOSITION of all
+        // possible variable assignments simultaneously:
+        //
+        //   |ψ⟩ = Σ α_x |x⟩    where x ∈ {0, 1}^n
+        //
+        // Each basis state |x⟩ encodes one assignment: qubit 0 = variable 1,
+        // qubit 1 = variable 2, etc. (LSB-first). For example, with 3 vars:
+        //
+        //   |101⟩ means x₁=1, x₂=0, x₃=1
+        //
+        // The oracle must evaluate the CNF formula f(x) on EVERY branch of
+        // the superposition and flip the phase of satisfying assignments:
+        //
+        //   |x⟩ → (-1)^f(x) |x⟩
+        //
+        // A satisfying assignment is one where f(x) = 1 (all clauses true).
+        // After the oracle, Grover's diffuser amplifies the negative-phase
+        // states, making them more likely to be measured.
+        //
+        // ===================================================================
+        // How the circuit evaluates the formula
+        // ===================================================================
+        //
+        // Classical logic has no direct quantum gate equivalents. We build
+        // boolean functions from reversible primitives:
+        //
+        //   Logic op  │ Quantum gate(s)        │ Notes
+        //   ──────────┼────────────────────────┼──────────────────────────
+        //   NOT a     │ X(a)                   │ flips qubit in-place
+        //   AND(a,b)  │ Toffoli(target, a, b)  │ target must start at |0⟩
+        //   AND(n)    │ MCX(target, controls)  │ V-chain for n≥3 controls
+        //   OR(a,b)   │ X+Toffoli+X+X          │ De Morgan: ¬(¬a ∧ ¬b)
+        //   NOR(a,b)  │ X+Toffoli+X            │ AND of inverted inputs
+        //   phase AND │ MCZ(qubits)            │ flips phase, not value
+        //
+        // Key constraint: quantum gates are reversible — AND can't discard
+        // an input bit. Instead, Toffoli writes the result into a separate
+        // target (ancilla) qubit while preserving both inputs.
+        //
+        // The circuit mirrors the CNF structure directly:
+        //   - One ancilla per clause → evaluates the OR (via De Morgan)
+        //   - One final MCZ across all clause ancillas → evaluates the AND
+        //
+        //   CNF: (clause₁) ∧ (clause₂) ∧ ... ∧ (clauseₖ)
+        //            ↓           ↓                 ↓
+        //         ancilla₁   ancilla₂   ...    ancillaₖ   ← each = 1 if clause satisfied
+        //            └───────────┼─────────────────┘
+        //                     MCZ  ← phase flip if ALL ancillas = 1
+        //
+        // Each clause OR is computed using De Morgan's law:
+        //   l₁ ∨ l₂ ∨ ... ∨ lₖ  =  ¬(¬l₁ ∧ ¬l₂ ∧ ... ∧ ¬lₖ)
+        //
+        // This converts OR (no direct quantum gate) into AND (MCX) + NOT (X),
+        // both of which we have. The formula's top-level structure stays CNF —
+        // we are NOT converting CNF to DNF.
+        //
+        // ===================================================================
+        // Per-clause steps (example: clause (x₁ ∨ ¬x₂))
+        // ===================================================================
+        //
+        //   1. X on un-negated vars: maps each qubit to NOT(literal_value).
+        //      After X, qubit=1 iff the literal is false.
+        //        positive literal x₁:  false means x₁=0, X maps to 1  ✓
+        //        negated literal ¬x₂:  false means x₂=1, already 1    ✓
+        //
+        //   2. MCX → clause_ancilla: AND of all flipped qubits.
+        //      Fires when ALL literals are false → ancilla = NOR(literals).
+        //
+        //   3. Undo X gates (restore data qubits to original values).
+        //
+        //   4. X on clause_ancilla: inverts NOR → OR.
+        //      Now ancilla = 1 iff clause is satisfied.
+        //
+        // After all clauses: MCZ on clause ancillas flips phase when
+        // ALL ancillas are 1 (= all clauses satisfied = formula satisfied).
+        //
+        // Finally, uncompute all clause ancillas in reverse order so they
+        // return to |0⟩ for the next Grover iteration.
+        //
+        // ===================================================================
+        // Ancilla layout
+        // ===================================================================
+        //
+        //   [clause₀, clause₁, ..., clause_{c-1}, scratch...]
+        //   ├── clause results ──────────────────┤├─ reusable ─┤
+        //
+        // Scratch is shared: MCX scratch reuses across sequential clauses
+        // (each clause uncomputes its MCX before the next). The final MCZ
+        // reuses the same scratch region (clause ancillas hold live values
+        // during MCZ, so they can't serve as MCZ scratch).
+
         let c = self.clauses.len();
-        // Ancilla layout: [clause_0, clause_1, ..., clause_{c-1}, scratch...]
         let clause_ancillas = &ancillas[..c];
         let scratch = &ancillas[c..];
 
@@ -254,57 +346,57 @@ impl Oracle for CnfOracle {
         for (i, clause) in self.clauses.iter().enumerate() {
             let controls: Vec<usize> = clause.iter().map(|lit| data_qubits[lit.qubit()]).collect();
 
-            // Step 1: X on UN-NEGATED variables (De Morgan: detect all-false)
+            // Step 1: X on un-negated variables — after X, qubit=1 means "literal is false"
             for lit in clause {
                 if !lit.is_negated() {
                     *circuit += PauliX::new(data_qubits[lit.qubit()]);
                 }
             }
 
-            // Step 2: MCX → clause ancilla (computes NOR of literals)
+            // Step 2: MCX → clause ancilla = AND(all-false) = NOR(literals)
             let mcx_scratch_needed = multi_cx::required_ancillas(controls.len());
             let mcx_ancillas = &scratch[..mcx_scratch_needed];
             *circuit += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas);
 
-            // Step 3: Undo X gates
+            // Step 3: undo X gates (restore data qubits to original values)
             for lit in clause {
                 if !lit.is_negated() {
                     *circuit += PauliX::new(data_qubits[lit.qubit()]);
                 }
             }
 
-            // Step 4: X on clause ancilla → invert: ancilla=1 when clause TRUE
+            // Step 4: X on clause ancilla — invert NOR to OR
+            // Now ancilla_i = 1 iff clause_i is satisfied
             *circuit += PauliX::new(clause_ancillas[i]);
         }
 
         // --- Phase flip: MCZ on all clause ancillas ---
+        // Flips phase iff ALL clause ancillas are 1 (= formula satisfied)
         let mcz_scratch_needed = multi_cz::required_ancillas(c);
         let mcz_ancillas = &scratch[..mcz_scratch_needed];
         *circuit += multi_cz::build_multi_cz(clause_ancillas, mcz_ancillas);
 
         // --- Uncompute: reverse clause evaluation (in reverse order) ---
+        // Restores all clause ancillas to |0⟩ so the diffuser operates
+        // only on the data qubit subspace.
         for (i, clause) in self.clauses.iter().enumerate().rev() {
             let controls: Vec<usize> = clause.iter().map(|lit| data_qubits[lit.qubit()]).collect();
 
-            // Undo step 4
-            *circuit += PauliX::new(clause_ancillas[i]);
+            *circuit += PauliX::new(clause_ancillas[i]); // undo step 4
 
-            // Undo step 1 (apply X before MCX)
             for lit in clause {
                 if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]);
+                    *circuit += PauliX::new(data_qubits[lit.qubit()]); // redo step 1
                 }
             }
 
-            // Undo step 2 (MCX again to uncompute)
             let mcx_scratch_needed = multi_cx::required_ancillas(controls.len());
             let mcx_ancillas = &scratch[..mcx_scratch_needed];
-            *circuit += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas);
+            *circuit += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas); // undo step 2
 
-            // Undo step 3 (undo X gates)
             for lit in clause {
                 if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]);
+                    *circuit += PauliX::new(data_qubits[lit.qubit()]); // undo step 1
                 }
             }
         }
@@ -364,18 +456,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // CnfOracle construction tests
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_cnf_oracle_evaluate_matches_free_fn() {
-        let clauses = vec![
-            vec![Literal::pos(1), Literal::pos(2)],
-            vec![Literal::neg(1), Literal::pos(3)],
-        ];
-        let cnf = CnfOracle::new(3, &clauses);
-        for i in 0..8 {
-            assert_eq!(cnf.evaluate(i), evaluate_cnf(&clauses, i));
-        }
-    }
 
     #[test]
     fn test_cnf_oracle_dedup() {
@@ -497,7 +577,7 @@ mod tests {
         };
         let result = try_search_with_oracle(&config, &cnf, &test_runner).unwrap();
         assert!(
-            cnf.evaluate(result.measured_state),
+            evaluate_cnf(&clauses, result.measured_state),
             "Found {} which is not a solution",
             result.measured_state
         );

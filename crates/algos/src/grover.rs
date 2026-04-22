@@ -55,11 +55,28 @@ pub trait Oracle {
     /// must set `GroverConfig::num_iterations` explicitly).
     fn num_solutions(&self) -> Option<NonZeroUsize>;
 
-    /// Emit gates into `circuit` that flip the phase of solution states.
+    /// Emit gates that flip the phase of solution states.
     ///
-    /// - `data_qubits`: the search register (indices chosen by the driver)
-    /// - `ancillas`: scratch qubits owned exclusively by this oracle,
-    ///   initialized to |0⟩. Must be restored to |0⟩ before returning.
+    /// Called once per Grover iteration on a superposition of all possible
+    /// inputs. The circuit must evaluate `f(x)` for every basis state
+    /// simultaneously and flip the phase of those where `f(x) = 1`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_qubits` — the search register. Each basis state `|x⟩` of
+    ///   these n qubits encodes one candidate input to the search problem.
+    ///   Bit mapping is LSB-first: `data_qubits[0]` = variable 1,
+    ///   `data_qubits[1]` = variable 2, etc. For example, with 3 data
+    ///   qubits, the state `|101⟩` represents x₁=1, x₂=0, x₃=1.
+    ///   The oracle reads these qubits (as controls) but must not change
+    ///   their computational-basis values — only phases may change.
+    ///
+    /// * `ancillas` — scratch qubits owned exclusively by this oracle.
+    ///   Guaranteed to be `|0⟩` at the start of each Grover iteration.
+    ///   The oracle may write intermediate results here (e.g., clause
+    ///   evaluation results) but **must restore them to `|0⟩`** before
+    ///   returning. Leaving ancillas entangled with data qubits corrupts
+    ///   the diffuser step that follows.
     fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]);
 }
 
@@ -379,6 +396,29 @@ fn build_grover_circuit<O: Oracle + ?Sized>(
 }
 
 /// Build the oracle sub-circuit that flips the phase of a single |target⟩.
+///
+/// The problem: MCZ only flips the phase of |11…1⟩ (all-ones state).
+/// We need to flip the phase of an arbitrary basis state |target⟩.
+///
+/// The trick: temporarily remap |target⟩ to |11…1⟩ using X gates,
+/// apply MCZ, then undo the X gates:
+///
+///   Example: target = 5 = |101⟩ (3 qubits, LSB-first: q₀=1, q₁=0, q₂=1)
+///
+///   Step 1 — X on zero-bits: flip q₁ (the only 0-bit)
+///     |101⟩ → |111⟩   (target becomes all-ones)
+///     |011⟩ → |001⟩   (other states move away from all-ones)
+///
+///   Step 2 — MCZ: flips phase of |111⟩ only
+///     |111⟩ gets phase −1 (this was our target |101⟩)
+///     all other states unchanged
+///
+///   Step 3 — undo X on q₁: restore original encoding
+///     |111⟩ → |101⟩   (back to original, but now has phase −1)
+///
+/// This works because X is self-inverse (X² = I) and MCZ only sees
+/// the remapped state. Each target is marked independently — the
+/// X-MCZ-X pattern is selective to exactly one computational basis state.
 fn apply_target_oracle(
     circuit: &mut Circuit,
     data_qubits: &[usize],
