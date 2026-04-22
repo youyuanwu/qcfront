@@ -12,6 +12,8 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+use crate::qubit::Qubit;
+
 /// Number of ancilla qubits required by [`build_multi_cx`] for `nc` controls.
 pub fn required_ancillas(nc: usize) -> usize {
     if nc >= 3 {
@@ -31,7 +33,7 @@ pub fn required_ancillas(nc: usize) -> usize {
 ///
 /// # Panics
 /// Panics if `controls` is empty or if the ancilla count doesn't match.
-pub fn build_multi_cx(target: usize, controls: &[usize], ancillas: &[usize]) -> Circuit {
+pub fn build_multi_cx(target: Qubit, controls: &[Qubit], ancillas: &[Qubit]) -> Circuit {
     let nc = controls.len();
     assert!(nc >= 1, "build_multi_cx requires at least 1 control");
 
@@ -50,30 +52,50 @@ pub fn build_multi_cx(target: usize, controls: &[usize], ancillas: &[usize]) -> 
     match nc {
         1 => {
             // CNOT: control → target
-            circuit += CNOT::new(controls[0], target);
+            circuit += CNOT::new(controls[0].index(), target.index());
         }
         2 => {
             // Toffoli: target, ctrl1, ctrl2
-            circuit += Toffoli::new(target, controls[0], controls[1]);
+            circuit += Toffoli::new(target.index(), controls[0].index(), controls[1].index());
         }
         _ => {
             // V-chain decomposition:
             // Forward pass: AND controls[0..nc-2] into ancillas
             // Note: Toffoli::new(target, ctrl1, ctrl2) — first arg is TARGET
-            circuit += Toffoli::new(ancillas[0], controls[0], controls[1]);
+            circuit += Toffoli::new(
+                ancillas[0].index(),
+                controls[0].index(),
+                controls[1].index(),
+            );
             for i in 1..ancillas.len() {
-                circuit += Toffoli::new(ancillas[i], ancillas[i - 1], controls[i + 1]);
+                circuit += Toffoli::new(
+                    ancillas[i].index(),
+                    ancillas[i - 1].index(),
+                    controls[i + 1].index(),
+                );
             }
 
             // Bottom: Toffoli with last ancilla, last control → target
             // last ancilla carries AND(controls[0..nc-2]), last control = controls[nc-1]
-            circuit += Toffoli::new(target, *ancillas.last().unwrap(), controls[nc - 1]);
+            circuit += Toffoli::new(
+                target.index(),
+                ancillas.last().unwrap().index(),
+                controls[nc - 1].index(),
+            );
 
             // Reverse pass: uncompute ancillas
             for i in (1..ancillas.len()).rev() {
-                circuit += Toffoli::new(ancillas[i], ancillas[i - 1], controls[i + 1]);
+                circuit += Toffoli::new(
+                    ancillas[i].index(),
+                    ancillas[i - 1].index(),
+                    controls[i + 1].index(),
+                );
             }
-            circuit += Toffoli::new(ancillas[0], controls[0], controls[1]);
+            circuit += Toffoli::new(
+                ancillas[0].index(),
+                controls[0].index(),
+                controls[1].index(),
+            );
         }
     }
 
@@ -86,6 +108,13 @@ mod tests {
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
     use std::collections::HashMap;
+
+    fn q(i: usize) -> Qubit {
+        Qubit::from_raw(i)
+    }
+    fn qs(indices: &[usize]) -> Vec<Qubit> {
+        indices.iter().map(|&i| q(i)).collect()
+    }
 
     fn run(circuit: &Circuit, n_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
         let backend = Backend::new(n_qubits, None);
@@ -100,7 +129,7 @@ mod tests {
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("m".to_string(), 1, true);
         circuit += PauliX::new(0); // control = |1⟩
-        circuit += build_multi_cx(1, &[0], &[]);
+        circuit += build_multi_cx(q(1), &qs(&[0]), &[]);
         circuit += MeasureQubit::new(1, "m".to_string(), 0);
 
         let results = run(&circuit, 2);
@@ -109,7 +138,7 @@ mod tests {
         // |0⟩|0⟩ → CNOT → |0⟩|0⟩
         let mut circuit2 = Circuit::new();
         circuit2 += DefinitionBit::new("m".to_string(), 1, true);
-        circuit2 += build_multi_cx(1, &[0], &[]);
+        circuit2 += build_multi_cx(q(1), &qs(&[0]), &[]);
         circuit2 += MeasureQubit::new(1, "m".to_string(), 0);
 
         let results2 = run(&circuit2, 2);
@@ -124,7 +153,7 @@ mod tests {
         circuit += DefinitionBit::new("m".to_string(), 1, true);
         circuit += PauliX::new(0);
         circuit += PauliX::new(1);
-        circuit += build_multi_cx(2, &[0, 1], &[]);
+        circuit += build_multi_cx(q(2), &qs(&[0, 1]), &[]);
         circuit += MeasureQubit::new(2, "m".to_string(), 0);
 
         let results = run(&circuit, 3);
@@ -137,7 +166,7 @@ mod tests {
         let mut circuit2 = Circuit::new();
         circuit2 += DefinitionBit::new("m".to_string(), 1, true);
         circuit2 += PauliX::new(0);
-        circuit2 += build_multi_cx(2, &[0, 1], &[]);
+        circuit2 += build_multi_cx(q(2), &qs(&[0, 1]), &[]);
         circuit2 += MeasureQubit::new(2, "m".to_string(), 0);
 
         let results2 = run(&circuit2, 3);
@@ -150,18 +179,18 @@ mod tests {
     /// MCX with 3 controls = V-chain with 1 ancilla.
     #[test]
     fn test_multi_cx_3_controls() {
-        let controls = [0, 1, 2];
-        let target = 3;
-        let ancillas = [4]; // 3-2 = 1 ancilla
+        let controls = qs(&[0, 1, 2]);
+        let target = q(3);
+        let ancillas = qs(&[4]); // 3-2 = 1 ancilla
 
         // All controls |1⟩ → flip target
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("m".to_string(), 1, true);
-        for &c in &controls {
-            circuit += PauliX::new(c);
+        for i in 0..3 {
+            circuit += PauliX::new(i);
         }
         circuit += build_multi_cx(target, &controls, &ancillas);
-        circuit += MeasureQubit::new(target, "m".to_string(), 0);
+        circuit += MeasureQubit::new(target.index(), "m".to_string(), 0);
 
         let results = run(&circuit, 5);
         assert!(results["m"][0][0], "MCX(3) should flip when all controls=1");
@@ -173,7 +202,7 @@ mod tests {
         circuit2 += PauliX::new(1);
         // control 2 stays |0⟩
         circuit2 += build_multi_cx(target, &controls, &ancillas);
-        circuit2 += MeasureQubit::new(target, "m".to_string(), 0);
+        circuit2 += MeasureQubit::new(target.index(), "m".to_string(), 0);
 
         let results2 = run(&circuit2, 5);
         assert!(
@@ -185,14 +214,14 @@ mod tests {
     /// Verify ancillas return to |0⟩ after V-chain.
     #[test]
     fn test_multi_cx_ancilla_reset() {
-        let controls = [0, 1, 2];
-        let target = 3;
-        let ancillas = [4];
+        let controls = qs(&[0, 1, 2]);
+        let target = q(3);
+        let ancillas = qs(&[4]);
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("anc".to_string(), 1, true);
-        for &c in &controls {
-            circuit += PauliX::new(c);
+        for i in 0..3 {
+            circuit += PauliX::new(i);
         }
         circuit += build_multi_cx(target, &controls, &ancillas);
         circuit += MeasureQubit::new(4, "anc".to_string(), 0);

@@ -14,6 +14,7 @@ use roqoqo::operations::*;
 use roqoqo::Circuit;
 
 use super::multi_cx::{build_multi_cx, required_ancillas};
+use crate::qubit::Qubit;
 
 /// Build a circuit that adds classical constant `k` to quantum register
 /// `sum_qubits`, controlled by `control`.
@@ -48,9 +49,9 @@ use super::multi_cx::{build_multi_cx, required_ancillas};
 /// - If `scratch` is too small for the largest MCX
 pub fn controlled_add(
     circuit: &mut Circuit,
-    control: usize,
-    sum_qubits: &[usize],
-    scratch: &[usize],
+    control: Qubit,
+    sum_qubits: &[Qubit],
+    scratch: &[Qubit],
     k: u64,
 ) {
     let m = sum_qubits.len();
@@ -86,7 +87,7 @@ pub fn controlled_add(
             *circuit += build_multi_cx(sum_qubits[p], &controls, mcx_scratch);
         }
         // Flip bit j itself
-        *circuit += CNOT::new(control, sum_qubits[j]);
+        *circuit += CNOT::new(control.index(), sum_qubits[j].index());
     }
 }
 
@@ -109,6 +110,13 @@ mod tests {
     use roqoqo_quest::Backend;
     use std::collections::HashMap;
 
+    fn q(i: usize) -> Qubit {
+        Qubit::from_raw(i)
+    }
+    fn qs(indices: &[usize]) -> Vec<Qubit> {
+        indices.iter().map(|&i| q(i)).collect()
+    }
+
     fn run(circuit: &Circuit, n_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
         let backend = Backend::new(n_qubits, None);
         let (bits, _, _) = backend.run_circuit(circuit).unwrap();
@@ -128,10 +136,10 @@ mod tests {
 
     /// Prepare sum register to a given value and run controlled_add.
     fn test_add(initial_sum: u64, k: u64, m: usize, control_on: bool) -> u64 {
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         let mut circuit = Circuit::new();
@@ -139,20 +147,20 @@ mod tests {
 
         // Set control
         if control_on {
-            circuit += PauliX::new(control);
+            circuit += PauliX::new(control.index());
         }
         // Set initial sum
-        for (i, &sq) in sum_qubits.iter().enumerate() {
+        for (i, sq) in sum_qubits.iter().enumerate() {
             if (initial_sum >> i) & 1 == 1 {
-                circuit += PauliX::new(sq);
+                circuit += PauliX::new(sq.index());
             }
         }
 
         controlled_add(&mut circuit, control, &sum_qubits, &scratch, k);
 
         // Measure sum register
-        for (i, &sq) in sum_qubits.iter().enumerate() {
-            circuit += MeasureQubit::new(sq, "sum".to_string(), i);
+        for (i, sq) in sum_qubits.iter().enumerate() {
+            circuit += MeasureQubit::new(sq.index(), "sum".to_string(), i);
         }
 
         let results = run(&circuit, total_qubits);
@@ -231,10 +239,10 @@ mod tests {
         use super::super::transform::inverse;
 
         let m = 4;
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         let initial = 3u64;
@@ -247,19 +255,19 @@ mod tests {
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("sum".to_string(), m, true);
-        circuit += PauliX::new(control);
+        circuit += PauliX::new(control.index());
 
-        for (i, &sq) in sum_qubits.iter().enumerate() {
+        for (i, sq) in sum_qubits.iter().enumerate() {
             if (initial >> i) & 1 == 1 {
-                circuit += PauliX::new(sq);
+                circuit += PauliX::new(sq.index());
             }
         }
 
         circuit += add_circuit;
         circuit += inv;
 
-        for (i, &sq) in sum_qubits.iter().enumerate() {
-            circuit += MeasureQubit::new(sq, "sum".to_string(), i);
+        for (i, sq) in sum_qubits.iter().enumerate() {
+            circuit += MeasureQubit::new(sq.index(), "sum".to_string(), i);
         }
 
         let results = run(&circuit, total_qubits);
@@ -273,10 +281,10 @@ mod tests {
         use super::super::transform::inverse;
 
         let m = 3;
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         for k in 1..8u64 {
@@ -287,19 +295,19 @@ mod tests {
 
                 let mut circuit = Circuit::new();
                 circuit += DefinitionBit::new("sum".to_string(), m, true);
-                circuit += PauliX::new(control);
+                circuit += PauliX::new(control.index());
 
-                for (i, &sq) in sum_qubits.iter().enumerate() {
+                for (i, sq) in sum_qubits.iter().enumerate() {
                     if (initial >> i) & 1 == 1 {
-                        circuit += PauliX::new(sq);
+                        circuit += PauliX::new(sq.index());
                     }
                 }
 
                 circuit += add_circuit;
                 circuit += inv;
 
-                for (i, &sq) in sum_qubits.iter().enumerate() {
-                    circuit += MeasureQubit::new(sq, "sum".to_string(), i);
+                for (i, sq) in sum_qubits.iter().enumerate() {
+                    circuit += MeasureQubit::new(sq.index(), "sum".to_string(), i);
                 }
 
                 let results = run(&circuit, total_qubits);
@@ -317,24 +325,24 @@ mod tests {
     #[test]
     fn test_scratch_reset() {
         let m = 4;
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("scratch".to_string(), scratch_count, true);
-        circuit += PauliX::new(control);
+        circuit += PauliX::new(control.index());
         // sum = 7 (0111), k = 5 (101) → triggers full carry propagation
-        for &sq in &sum_qubits[..3] {
-            circuit += PauliX::new(sq);
+        for sq in &sum_qubits[..3] {
+            circuit += PauliX::new(sq.index());
         }
 
         controlled_add(&mut circuit, control, &sum_qubits, &scratch, 5);
 
-        for (i, &sq) in scratch.iter().enumerate() {
-            circuit += MeasureQubit::new(sq, "scratch".to_string(), i);
+        for (i, sq) in scratch.iter().enumerate() {
+            circuit += MeasureQubit::new(sq.index(), "scratch".to_string(), i);
         }
 
         let results = run(&circuit, total_qubits);
@@ -349,9 +357,9 @@ mod tests {
         // S = {3, 5, 7}, T = 8
         // Add 3, then 5 → should get 8
         let m = 4;
-        let sum_qubits: Vec<usize> = (2..2 + m).collect(); // qubits 2-5
+        let sum_qubits = qs(&(2..2 + m).collect::<Vec<_>>()); // qubits 2-5
         let scratch_count = required_scratch(m);
-        let scratch: Vec<usize> = (2 + m..2 + m + scratch_count).collect();
+        let scratch = qs(&(2 + m..2 + m + scratch_count).collect::<Vec<_>>());
         let total_qubits = 2 + m + scratch_count;
 
         let mut circuit = Circuit::new();
@@ -359,14 +367,14 @@ mod tests {
 
         // data qubit 0 = include s₀=3 (control on)
         circuit += PauliX::new(0);
-        controlled_add(&mut circuit, 0, &sum_qubits, &scratch, 3);
+        controlled_add(&mut circuit, q(0), &sum_qubits, &scratch, 3);
 
         // data qubit 1 = include s₁=5 (control on)
         circuit += PauliX::new(1);
-        controlled_add(&mut circuit, 1, &sum_qubits, &scratch, 5);
+        controlled_add(&mut circuit, q(1), &sum_qubits, &scratch, 5);
 
-        for (i, &sq) in sum_qubits.iter().enumerate() {
-            circuit += MeasureQubit::new(sq, "sum".to_string(), i);
+        for (i, sq) in sum_qubits.iter().enumerate() {
+            circuit += MeasureQubit::new(sq.index(), "sum".to_string(), i);
         }
 
         let results = run(&circuit, total_qubits);

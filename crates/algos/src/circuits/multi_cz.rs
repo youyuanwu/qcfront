@@ -8,6 +8,8 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+use crate::qubit::QubitRange;
+
 /// Number of ancilla qubits required by [`build_multi_cz`] for `n` qubits.
 pub fn required_ancillas(n: usize) -> usize {
     if n >= 4 {
@@ -26,7 +28,7 @@ pub fn required_ancillas(n: usize) -> usize {
 ///
 /// # Panics
 /// Panics if `qubits` is empty or if the ancilla count doesn't match.
-pub fn build_multi_cz(qubits: &[usize], ancillas: &[usize]) -> Circuit {
+pub fn build_multi_cz(qubits: &QubitRange, ancillas: &QubitRange) -> Circuit {
     let n = qubits.len();
     assert!(n >= 1, "build_multi_cz requires at least 1 qubit");
 
@@ -44,31 +46,54 @@ pub fn build_multi_cz(qubits: &[usize], ancillas: &[usize]) -> Circuit {
 
     match n {
         1 => {
-            circuit += PauliZ::new(qubits[0]);
+            circuit += PauliZ::new(qubits.qubit(0).index());
         }
         2 => {
-            circuit += ControlledPauliZ::new(qubits[0], qubits[1]);
+            circuit += ControlledPauliZ::new(qubits.qubit(0).index(), qubits.qubit(1).index());
         }
         3 => {
-            circuit += ControlledControlledPauliZ::new(qubits[0], qubits[1], qubits[2]);
+            circuit += ControlledControlledPauliZ::new(
+                qubits.qubit(0).index(),
+                qubits.qubit(1).index(),
+                qubits.qubit(2).index(),
+            );
         }
         _ => {
             // Barenco V-chain decomposition:
             // Forward pass: cascade Toffoli to propagate AND of controls into ancillas
             // Note: Toffoli::new(target, ctrl1, ctrl2) — first arg is TARGET
-            circuit += Toffoli::new(ancillas[0], qubits[0], qubits[1]);
+            circuit += Toffoli::new(
+                ancillas.qubit(0).index(),
+                qubits.qubit(0).index(),
+                qubits.qubit(1).index(),
+            );
             for i in 1..ancillas.len() {
-                circuit += Toffoli::new(ancillas[i], ancillas[i - 1], qubits[i + 1]);
+                circuit += Toffoli::new(
+                    ancillas.qubit(i).index(),
+                    ancillas.qubit(i - 1).index(),
+                    qubits.qubit(i + 1).index(),
+                );
             }
 
             // Apply CZ between last ancilla and last data qubit
-            circuit += ControlledPauliZ::new(*ancillas.last().unwrap(), qubits[n - 1]);
+            circuit += ControlledPauliZ::new(
+                ancillas.qubit(ancillas.len() - 1).index(),
+                qubits.qubit(n - 1).index(),
+            );
 
             // Reverse pass: uncompute ancillas
             for i in (1..ancillas.len()).rev() {
-                circuit += Toffoli::new(ancillas[i], ancillas[i - 1], qubits[i + 1]);
+                circuit += Toffoli::new(
+                    ancillas.qubit(i).index(),
+                    ancillas.qubit(i - 1).index(),
+                    qubits.qubit(i + 1).index(),
+                );
             }
-            circuit += Toffoli::new(ancillas[0], qubits[0], qubits[1]);
+            circuit += Toffoli::new(
+                ancillas.qubit(0).index(),
+                qubits.qubit(0).index(),
+                qubits.qubit(1).index(),
+            );
         }
     }
 
@@ -81,6 +106,17 @@ mod tests {
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
     use std::collections::HashMap;
+
+    fn reg(start: usize, len: usize) -> QubitRange {
+        let mut alloc = crate::qubit::QubitAllocator::new();
+        if start > 0 {
+            alloc.allocate("_pad", start);
+        }
+        alloc.allocate("test", len)
+    }
+    fn empty_reg() -> QubitRange {
+        crate::qubit::QubitAllocator::new().allocate("empty", 0)
+    }
 
     /// Run a circuit and return the bit register values.
     fn run(circuit: &Circuit, n_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
@@ -142,7 +178,7 @@ mod tests {
 
         // |+⟩ → Z → |−⟩ → H → |1⟩
         circuit += Hadamard::new(0);
-        circuit += build_multi_cz(&[0], &[]);
+        circuit += build_multi_cz(&reg(0, 1), &empty_reg());
         circuit += Hadamard::new(0);
         circuit += MeasureQubit::new(0, "m".to_string(), 0);
 
@@ -159,7 +195,7 @@ mod tests {
 
         circuit += Hadamard::new(0);
         circuit += PauliX::new(1);
-        circuit += build_multi_cz(&[0, 1], &[]);
+        circuit += build_multi_cz(&reg(0, 2), &empty_reg());
         circuit += PauliX::new(1);
         circuit += Hadamard::new(0);
         circuit += MeasureQubit::new(0, "m".to_string(), 0);
@@ -172,7 +208,7 @@ mod tests {
         circuit2 += DefinitionBit::new("m".to_string(), 1, true);
 
         circuit2 += Hadamard::new(0);
-        circuit2 += build_multi_cz(&[0, 1], &[]);
+        circuit2 += build_multi_cz(&reg(0, 2), &empty_reg());
         circuit2 += Hadamard::new(0);
         circuit2 += MeasureQubit::new(0, "m".to_string(), 0);
 
@@ -190,7 +226,7 @@ mod tests {
         circuit += Hadamard::new(0);
         circuit += PauliX::new(1);
         circuit += PauliX::new(2);
-        circuit += build_multi_cz(&[0, 1, 2], &[]);
+        circuit += build_multi_cz(&reg(0, 3), &empty_reg());
         circuit += PauliX::new(1);
         circuit += PauliX::new(2);
         circuit += Hadamard::new(0);
@@ -206,7 +242,7 @@ mod tests {
         circuit2 += Hadamard::new(0);
         circuit2 += PauliX::new(1);
         // qubit 2 stays |0⟩
-        circuit2 += build_multi_cz(&[0, 1, 2], &[]);
+        circuit2 += build_multi_cz(&reg(0, 3), &empty_reg());
         circuit2 += PauliX::new(1);
         circuit2 += Hadamard::new(0);
         circuit2 += MeasureQubit::new(0, "m".to_string(), 0);
@@ -219,8 +255,8 @@ mod tests {
     #[test]
     fn test_multi_cz_4() {
         // All |1⟩ → should flip
-        let data_qubits = [0, 1, 2, 3];
-        let ancillas = [4, 5]; // 4-2 = 2 ancillas
+        let data_qubits = reg(0, 4);
+        let ancillas = reg(4, 2); // 4-2 = 2 ancillas
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("m".to_string(), 1, true);
@@ -260,19 +296,19 @@ mod tests {
     /// Multi-CZ on 5 qubits: V-chain with 3 ancillas.
     #[test]
     fn test_multi_cz_5() {
-        let data_qubits = [0, 1, 2, 3, 4];
-        let ancillas = [5, 6, 7]; // 5-2 = 3 ancillas
+        let data_qubits = reg(0, 5);
+        let ancillas = reg(5, 3); // 5-2 = 3 ancillas
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("m".to_string(), 1, true);
 
         circuit += Hadamard::new(0);
-        for &q in &data_qubits[1..] {
-            circuit += PauliX::new(q);
+        for i in 1..5 {
+            circuit += PauliX::new(i);
         }
         circuit += build_multi_cz(&data_qubits, &ancillas);
-        for &q in &data_qubits[1..] {
-            circuit += PauliX::new(q);
+        for i in 1..5 {
+            circuit += PauliX::new(i);
         }
         circuit += Hadamard::new(0);
         circuit += MeasureQubit::new(0, "m".to_string(), 0);
@@ -284,15 +320,15 @@ mod tests {
     /// Verify ancillas return to |0⟩ after V-chain uncomputation.
     #[test]
     fn test_ancilla_reset() {
-        let data_qubits = [0, 1, 2, 3];
-        let ancillas = [4, 5];
+        let data_qubits = reg(0, 4);
+        let ancillas = reg(4, 2);
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("anc".to_string(), 2, true);
 
         // Prepare all data qubits as |1⟩
-        for &q in &data_qubits {
-            circuit += PauliX::new(q);
+        for i in 0..4 {
+            circuit += PauliX::new(i);
         }
         circuit += build_multi_cz(&data_qubits, &ancillas);
 

@@ -14,6 +14,7 @@ use roqoqo::Circuit;
 use crate::circuits::multi_cx;
 use crate::circuits::multi_cz;
 use crate::circuits::transform;
+use crate::qubit::QubitRange;
 use crate::sat::Clause;
 
 use super::Oracle;
@@ -139,7 +140,7 @@ impl Oracle for CnfOracle {
         None // unknown — that's the whole point
     }
 
-    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &QubitRange, ancillas: &QubitRange) {
         // ===================================================================
         // What this circuit does
         // ===================================================================
@@ -213,42 +214,48 @@ impl Oracle for CnfOracle {
         // same pool (temporally disjoint from clause evaluation).
 
         let c = self.clauses.len();
-        let clause_ancillas = &ancillas[..c];
-        let scratch = &ancillas[c..];
+        let (clause_anc_reg, scratch_reg) = ancillas.split_at(c);
 
         // --- Compute: evaluate each clause into its ancilla ---
         let mut compute = Circuit::new();
         for (i, clause) in self.clauses.iter().enumerate() {
-            let controls: Vec<usize> = clause.iter().map(|lit| data_qubits[lit.qubit()]).collect();
+            let controls: Vec<crate::qubit::Qubit> = clause
+                .iter()
+                .map(|lit| data_qubits.qubit(lit.qubit()))
+                .collect();
 
             // X on un-negated variables
             for lit in clause {
                 if !lit.is_negated() {
-                    compute += PauliX::new(data_qubits[lit.qubit()]);
+                    compute += PauliX::new(data_qubits.qubit(lit.qubit()).index());
                 }
             }
 
             // MCX → clause ancilla = NOR(literals)
             let mcx_scratch_needed = multi_cx::required_ancillas(controls.len());
-            let mcx_ancillas = &scratch[..mcx_scratch_needed];
-            compute += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas);
+            let mcx_ancillas = scratch_reg.slice(..mcx_scratch_needed);
+            compute += multi_cx::build_multi_cx(
+                clause_anc_reg.qubit(i),
+                &controls,
+                &mcx_ancillas.to_qubits(),
+            );
 
             // Undo X gates
             for lit in clause {
                 if !lit.is_negated() {
-                    compute += PauliX::new(data_qubits[lit.qubit()]);
+                    compute += PauliX::new(data_qubits.qubit(lit.qubit()).index());
                 }
             }
 
             // X on clause ancilla — invert NOR to OR
-            compute += PauliX::new(clause_ancillas[i]);
+            compute += PauliX::new(clause_anc_reg.qubit(i).index());
         }
 
         // --- Action: MCZ on all clause ancillas ---
         let mut action = Circuit::new();
         let mcz_scratch_needed = multi_cz::required_ancillas(c);
-        let mcz_ancillas = &scratch[..mcz_scratch_needed];
-        action += multi_cz::build_multi_cz(clause_ancillas, mcz_ancillas);
+        let mcz_ancillas = scratch_reg.slice(..mcz_scratch_needed);
+        action += multi_cz::build_multi_cz(&clause_anc_reg, &mcz_ancillas);
 
         // compute → action → inverse(compute)
         *circuit += transform::within_apply(&compute, &action)

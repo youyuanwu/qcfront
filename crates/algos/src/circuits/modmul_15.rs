@@ -19,13 +19,16 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+use crate::qubit::Qubit;
+
 /// Append a controlled multiplication by `a` mod 15 to the circuit.
 ///
 /// `control`: index of the control qubit
 /// `work`: indices of the 4 work qubits (LSB first)
 ///
 /// Only the work register is modified, controlled on `control` being |1⟩.
-pub fn controlled_modmul_15(circuit: &mut Circuit, a: u64, control: usize, work: [usize; 4]) {
+pub fn controlled_modmul_15(circuit: &mut Circuit, a: u64, control: Qubit, work: &[Qubit]) {
+    assert_eq!(work.len(), 4, "work register must have exactly 4 qubits");
     match a % 15 {
         1 => {} // identity — no gates needed
         2 => controlled_mul2_mod15(circuit, control, work),
@@ -55,7 +58,7 @@ pub fn controlled_modmul_15(circuit: &mut Circuit, a: u64, control: usize, work:
 ///
 /// Left cyclic shift: move each bit one position up, top wraps to bottom.
 /// Implemented as a chain of controlled SWAPs from top to bottom.
-fn controlled_mul2_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]) {
+fn controlled_mul2_mod15(circuit: &mut Circuit, control: Qubit, work: &[Qubit]) {
     // Left cyclic shift: SWAP(3,2), SWAP(2,1), SWAP(1,0)
     // This moves: b₃→b₂, b₂→b₁, b₁→b₀, b₀→b₃
     controlled_swap(circuit, control, work[3], work[2]);
@@ -91,16 +94,16 @@ fn controlled_mul2_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]
 ///
 /// Right cyclic shift: SWAP(3,2), SWAP(2,1), SWAP(1,0)
 /// Then controlled-X on all 4 qubits.
-fn controlled_mul7_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]) {
+fn controlled_mul7_mod15(circuit: &mut Circuit, control: Qubit, work: &[Qubit]) {
     // Right cyclic shift: SWAP(0,1), SWAP(1,2), SWAP(2,3)
     controlled_swap(circuit, control, work[0], work[1]);
     controlled_swap(circuit, control, work[1], work[2]);
     controlled_swap(circuit, control, work[2], work[3]);
     // Bit flip all work qubits (controlled)
-    *circuit += CNOT::new(control, work[0]);
-    *circuit += CNOT::new(control, work[1]);
-    *circuit += CNOT::new(control, work[2]);
-    *circuit += CNOT::new(control, work[3]);
+    *circuit += CNOT::new(control.index(), work[0].index());
+    *circuit += CNOT::new(control.index(), work[1].index());
+    *circuit += CNOT::new(control.index(), work[2].index());
+    *circuit += CNOT::new(control.index(), work[3].index());
 }
 
 /// Controlled multiplication by 11 mod 15.
@@ -114,12 +117,12 @@ fn controlled_mul7_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]
 ///
 /// Verify: x=1: flip → 14 (|1110⟩), shift left 2 → 14·4 mod 15 = 11. ✓
 ///         x=2: flip → 13 (|1101⟩), shift left 2 → 13·4 mod 15 = 52 mod 15 = 7. ✓ (11·2=22 mod 15=7)
-fn controlled_mul11_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]) {
+fn controlled_mul11_mod15(circuit: &mut Circuit, control: Qubit, work: &[Qubit]) {
     // Bit flip all (controlled)
-    *circuit += CNOT::new(control, work[0]);
-    *circuit += CNOT::new(control, work[1]);
-    *circuit += CNOT::new(control, work[2]);
-    *circuit += CNOT::new(control, work[3]);
+    *circuit += CNOT::new(control.index(), work[0].index());
+    *circuit += CNOT::new(control.index(), work[1].index());
+    *circuit += CNOT::new(control.index(), work[2].index());
+    *circuit += CNOT::new(control.index(), work[3].index());
     // Left cyclic shift twice (= mul by 4)
     controlled_mul2_mod15(circuit, control, work);
     controlled_mul2_mod15(circuit, control, work);
@@ -133,12 +136,12 @@ fn controlled_mul11_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4
 /// Verify: x=1: flip → 14, mul2 → 14·2 mod 15 = 28 mod 15 = 13. ✓
 ///         x=2: flip → 13, mul2 → 13·2 mod 15 = 26 mod 15 = 11. ✓ (13·2=26 mod 15=11)
 ///         x=7: flip → 8,  mul2 → 8·2 mod 15 = 16 mod 15 = 1.  ✓ (13·7=91 mod 15=1)
-fn controlled_mul13_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]) {
+fn controlled_mul13_mod15(circuit: &mut Circuit, control: Qubit, work: &[Qubit]) {
     // Bit flip all (controlled)
-    *circuit += CNOT::new(control, work[0]);
-    *circuit += CNOT::new(control, work[1]);
-    *circuit += CNOT::new(control, work[2]);
-    *circuit += CNOT::new(control, work[3]);
+    *circuit += CNOT::new(control.index(), work[0].index());
+    *circuit += CNOT::new(control.index(), work[1].index());
+    *circuit += CNOT::new(control.index(), work[2].index());
+    *circuit += CNOT::new(control.index(), work[3].index());
     // Left cyclic shift (= mul by 2)
     controlled_mul2_mod15(circuit, control, work);
 }
@@ -149,11 +152,11 @@ fn controlled_mul13_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4
 ///
 /// Verify: x=1: flip → 14. ✓ (14·1=14)
 ///         x=7: flip → 8.  ✓ (14·7=98 mod 15=8)
-fn controlled_mul14_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4]) {
-    *circuit += CNOT::new(control, work[0]);
-    *circuit += CNOT::new(control, work[1]);
-    *circuit += CNOT::new(control, work[2]);
-    *circuit += CNOT::new(control, work[3]);
+fn controlled_mul14_mod15(circuit: &mut Circuit, control: Qubit, work: &[Qubit]) {
+    *circuit += CNOT::new(control.index(), work[0].index());
+    *circuit += CNOT::new(control.index(), work[1].index());
+    *circuit += CNOT::new(control.index(), work[2].index());
+    *circuit += CNOT::new(control.index(), work[3].index());
 }
 
 /// Controlled SWAP (Fredkin gate) decomposition.
@@ -162,44 +165,52 @@ fn controlled_mul14_mod15(circuit: &mut Circuit, control: usize, work: [usize; 4
 ///
 /// Standard decomposition: CNOT(b→a); Toffoli(c, a → b); CNOT(b→a)
 /// Note: roqoqo Toffoli::new(target, ctrl1, ctrl2) — first arg is the target.
-fn controlled_swap(circuit: &mut Circuit, control: usize, target_a: usize, target_b: usize) {
-    *circuit += CNOT::new(target_b, target_a); // a ^= b
-    *circuit += Toffoli::new(target_b, control, target_a); // b ^= (control AND a)
-    *circuit += CNOT::new(target_b, target_a); // a ^= b
+fn controlled_swap(circuit: &mut Circuit, control: Qubit, target_a: Qubit, target_b: Qubit) {
+    *circuit += CNOT::new(target_b.index(), target_a.index()); // a ^= b
+    *circuit += Toffoli::new(target_b.index(), control.index(), target_a.index()); // b ^= (control AND a)
+    *circuit += CNOT::new(target_b.index(), target_a.index()); // a ^= b
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qubit::Qubit;
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
+
+    fn q(i: usize) -> Qubit {
+        Qubit::from_raw(i)
+    }
+    fn qs(indices: &[usize]) -> Vec<Qubit> {
+        indices.iter().map(|&i| q(i)).collect()
+    }
 
     /// Helper: build a circuit that prepares |x⟩ in the work register,
     /// sets the control qubit to |1⟩, applies controlled mul_a mod 15,
     /// and measures the work register.
     fn test_modmul(a: u64, x: u64) -> u64 {
-        let control = 0;
-        let work = [1, 2, 3, 4];
+        let control = q(0);
+        let work = qs(&[1, 2, 3, 4]);
 
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("ro".to_string(), 4, true);
 
         // Set control to |1⟩
-        circuit += PauliX::new(control);
+        circuit += PauliX::new(control.index());
 
         // Prepare |x⟩ in work register
-        for (bit, &q) in work.iter().enumerate() {
+        for (bit, wq) in work.iter().enumerate() {
             if (x >> bit) & 1 == 1 {
-                circuit += PauliX::new(q);
+                circuit += PauliX::new(wq.index());
             }
         }
 
         // Apply controlled modular multiplication
-        controlled_modmul_15(&mut circuit, a, control, work);
+        controlled_modmul_15(&mut circuit, a, control, &work);
 
         // Measure work register
-        for (i, &q) in work.iter().enumerate() {
-            circuit += MeasureQubit::new(q, "ro".to_string(), i);
+        for (i, wq) in work.iter().enumerate() {
+            circuit += MeasureQubit::new(wq.index(), "ro".to_string(), i);
         }
 
         let backend = Backend::new(5, None);
@@ -395,7 +406,7 @@ mod tests {
             circuit += PauliX::new(2);
         }
 
-        controlled_swap(&mut circuit, 0, 1, 2);
+        controlled_swap(&mut circuit, q(0), q(1), q(2));
 
         circuit += MeasureQubit::new(1, "ro".to_string(), 0);
         circuit += MeasureQubit::new(2, "ro".to_string(), 1);

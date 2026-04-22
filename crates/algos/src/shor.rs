@@ -15,6 +15,7 @@ use roqoqo::Circuit;
 use crate::circuits::modmul_15::controlled_modmul_15;
 use crate::math::{convergents, mod_pow, random_coprime};
 use crate::qpe::{bits_to_int_lsb, bits_to_int_msb, build_qpe_circuit};
+use crate::qubit::QubitAllocator;
 use crate::runner::QuantumRunner;
 
 /// Configuration for Shor's factoring algorithm.
@@ -166,16 +167,23 @@ pub(crate) fn build_order_finding_circuit(a: u64, n: u64) -> (Circuit, usize) {
 
     let n_bits: usize = 4;
     let n_counting = 2 * n_bits; // 8 counting qubits
-    let work: [usize; 4] = [n_counting, n_counting + 1, n_counting + 2, n_counting + 3];
+
+    let mut alloc = QubitAllocator::new();
+    // QPE internally allocates counting qubits 0..n_counting,
+    // so we pad past that range for work qubits.
+    let _counting_pad = alloc.allocate("counting", n_counting);
+    let work_reg = alloc.allocate("work", n_bits);
+    let work_qubits = work_reg.to_qubits();
+    let work_indices: Vec<usize> = work_reg.iter().map(|q| q.index()).collect();
 
     // Initialize work register to |1⟩, then delegate to QPE
     let mut circuit = Circuit::new();
-    circuit += PauliX::new(work[0]);
+    circuit += PauliX::new(work_reg.qubit(0).index());
 
-    let qpe = build_qpe_circuit(n_counting, &work, |circ, ctrl, k| {
+    let qpe = build_qpe_circuit(n_counting, &work_indices, |circ, ctrl, k| {
         let power = mod_pow(a, 1u64 << k, n);
         if power != 1 {
-            controlled_modmul_15(circ, power, ctrl, work);
+            controlled_modmul_15(circ, power, ctrl, &work_qubits);
         }
     });
     circuit += qpe;

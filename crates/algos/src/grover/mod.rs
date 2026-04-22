@@ -32,6 +32,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::multi_cz::{build_multi_cz, required_ancillas};
 use crate::circuits::transform;
+use crate::qubit::{QubitAllocator, QubitRange};
 use crate::runner::QuantumRunner;
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,7 @@ pub trait Oracle {
     ///   evaluation results) but **must restore them to `|0⟩`** before
     ///   returning. Leaving ancillas entangled with data qubits corrupts
     ///   the diffuser step that follows.
-    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]);
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &QubitRange, ancillas: &QubitRange);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,27 +280,28 @@ fn build_grover_circuit<O: Oracle + ?Sized>(
     let d = required_ancillas(n);
     let a = oracle.num_ancillas();
 
-    let data_qubits: Vec<usize> = (0..n).collect();
-    let diffuser_ancillas: Vec<usize> = (n..n + d).collect();
-    let oracle_ancillas: Vec<usize> = (n + d..n + d + a).collect();
+    let mut alloc = QubitAllocator::new();
+    let data = alloc.allocate("data", n);
+    let diffuser_ancillas = alloc.allocate("diffuser", d);
+    let oracle_ancillas = alloc.allocate("oracle", a);
 
     let mut circuit = Circuit::new();
     circuit += DefinitionBit::new("result".to_string(), n, true);
 
     // 1. Initialize: H on all data qubits → equal superposition
-    for &q in &data_qubits {
-        circuit += Hadamard::new(q);
+    for q in data.iter() {
+        circuit += Hadamard::new(q.index());
     }
 
     // 2. Repeat Grover iterations
     for _ in 0..num_iterations {
-        oracle.apply(&mut circuit, &data_qubits, &oracle_ancillas);
-        build_diffuser(&mut circuit, &data_qubits, &diffuser_ancillas);
+        oracle.apply(&mut circuit, &data, &oracle_ancillas);
+        build_diffuser(&mut circuit, &data, &diffuser_ancillas);
     }
 
     // 3. Measure data qubits
-    for (i, &q) in data_qubits.iter().enumerate() {
-        circuit += MeasureQubit::new(q, "result".to_string(), i);
+    for (i, q) in data.iter().enumerate() {
+        circuit += MeasureQubit::new(q.index(), "result".to_string(), i);
     }
 
     circuit
@@ -309,14 +311,14 @@ fn build_grover_circuit<O: Oracle + ?Sized>(
 ///
 /// Implements −(2|s⟩⟨s| − I) = I − 2|s⟩⟨s| via H-X-MCZ-X-H.
 /// Equivalent to 2|s⟩⟨s| − I up to global phase (unobservable).
-fn build_diffuser(circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+fn build_diffuser(circuit: &mut Circuit, data_qubits: &QubitRange, ancillas: &QubitRange) {
     // Compute: H then X on all data qubits
     let mut compute = Circuit::new();
-    for &q in data_qubits {
-        compute += Hadamard::new(q);
+    for q in data_qubits.iter() {
+        compute += Hadamard::new(q.index());
     }
-    for &q in data_qubits {
-        compute += PauliX::new(q);
+    for q in data_qubits.iter() {
+        compute += PauliX::new(q.index());
     }
 
     // Action: MCZ
@@ -592,7 +594,7 @@ mod tests {
             fn num_solutions(&self) -> Option<NonZeroUsize> {
                 None
             }
-            fn apply(&self, _: &mut Circuit, _: &[usize], _: &[usize]) {}
+            fn apply(&self, _: &mut Circuit, _: &QubitRange, _: &QubitRange) {}
         }
         let config = GroverConfig {
             num_qubits: 2,
@@ -617,9 +619,12 @@ mod tests {
             fn num_solutions(&self) -> Option<NonZeroUsize> {
                 None
             }
-            fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], _: &[usize]) {
+            fn apply(&self, circuit: &mut Circuit, data_qubits: &QubitRange, _: &QubitRange) {
                 // Mark state |3⟩ = |11⟩ — just MCZ on both qubits
-                *circuit += ControlledPauliZ::new(data_qubits[0], data_qubits[1]);
+                *circuit += ControlledPauliZ::new(
+                    data_qubits.qubit(0).index(),
+                    data_qubits.qubit(1).index(),
+                );
             }
         }
         let config = GroverConfig {

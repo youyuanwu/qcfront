@@ -11,6 +11,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::multi_cz::{build_multi_cz, required_ancillas};
 use crate::circuits::transform;
+use crate::qubit::QubitRange;
 
 use super::Oracle;
 
@@ -88,7 +89,7 @@ impl Oracle for IndexOracle {
         NonZeroUsize::new(self.targets.len())
     }
 
-    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &QubitRange, ancillas: &QubitRange) {
         for &target in &self.targets {
             apply_target_oracle(circuit, data_qubits, ancillas, target);
         }
@@ -121,15 +122,15 @@ impl Oracle for IndexOracle {
 /// X-MCZ-X pattern is selective to exactly one computational basis state.
 fn apply_target_oracle(
     circuit: &mut Circuit,
-    data_qubits: &[usize],
-    ancillas: &[usize],
+    data_qubits: &QubitRange,
+    ancillas: &QubitRange,
     target: usize,
 ) {
     // Compute: X on qubits where target bit is 0 (remap |target⟩ → |11…1⟩)
     let mut compute = Circuit::new();
-    for (i, &q) in data_qubits.iter().enumerate() {
+    for (i, q) in data_qubits.iter().enumerate() {
         if (target >> i) & 1 == 0 {
-            compute += PauliX::new(q);
+            compute += PauliX::new(q.index());
         }
     }
 

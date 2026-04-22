@@ -14,6 +14,8 @@ use std::fmt;
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+use crate::qubit::Qubit;
+
 /// Error returned when [`inverse`] encounters an unsupported gate type.
 #[derive(Debug, Clone)]
 pub struct UnsupportedGate {
@@ -158,8 +160,8 @@ fn invert_gate(op: &Operation) -> Result<Circuit, UnsupportedGate> {
 ///   `scratch.len() >= controlled_scratch_required(circuit)`
 pub fn controlled(
     circuit: &Circuit,
-    control: usize,
-    scratch: &[usize],
+    control: Qubit,
+    scratch: &[Qubit],
 ) -> Result<Circuit, UnsupportedGate> {
     let mut result = Circuit::new();
 
@@ -202,23 +204,23 @@ pub fn controlled_scratch_required(circuit: &Circuit) -> Result<usize, Unsupport
 /// Promote a single gate by adding one control qubit.
 fn promote_gate(
     op: &Operation,
-    control: usize,
-    scratch: &[usize],
+    control: Qubit,
+    scratch: &[Qubit],
 ) -> Result<Circuit, UnsupportedGate> {
     let mut c = Circuit::new();
 
     match op {
         // X(t) → CNOT(ctrl, t)
         Operation::PauliX(g) => {
-            c += CNOT::new(control, *g.qubit());
+            c += CNOT::new(control.index(), *g.qubit());
         }
 
         // CNOT(c0, t) → Toffoli(t, ctrl, c0)
         Operation::CNOT(g) => {
-            c += Toffoli::new(*g.target(), control, *g.control());
+            c += Toffoli::new(*g.target(), control.index(), *g.control());
         }
 
-        // Toffoli(t, c0, c1) → MCX(target=t, controls=[ctrl, c0, c1], scratch)
+        // Toffoli(t, c0, c1) → MCX with 3 controls, inlined V-chain
         Operation::Toffoli(g) => {
             // roqoqo struct stores fields as (control_0, control_1, target) but
             // our codebase convention is Toffoli::new(target, ctrl0, ctrl1) where
@@ -227,11 +229,18 @@ fn promote_gate(
             //   physical ctrl0  = g.control_1() (second arg)
             //   physical ctrl1  = g.target()    (third arg)
             // MCX: flip physical target when all controls (incl. new ctrl) are |1⟩
-            let mcx_target = *g.control_0();
-            let mcx_controls = vec![control, *g.control_1(), *g.target()];
-            let mcx_scratch_needed = super::multi_cx::required_ancillas(mcx_controls.len());
-            let mcx_scratch = &scratch[..mcx_scratch_needed];
-            c += super::multi_cx::build_multi_cx(mcx_target, &mcx_controls, mcx_scratch);
+            let target = *g.control_0();
+            let c0 = control.index();
+            let c1 = *g.control_1();
+            let c2 = *g.target();
+            // 3-control MCX via V-chain with 1 ancilla (scratch[0])
+            let anc = scratch[0].index();
+            // Forward: AND(c0, c1) → anc
+            c += Toffoli::new(anc, c0, c1);
+            // Bottom: AND(anc, c2) → target
+            c += Toffoli::new(target, anc, c2);
+            // Reverse: uncompute anc
+            c += Toffoli::new(anc, c0, c1);
         }
 
         other => {
@@ -254,6 +263,13 @@ mod tests {
     use roqoqo::backends::EvaluatingBackend;
     use roqoqo_quest::Backend;
     use std::collections::HashMap;
+
+    fn q(i: usize) -> Qubit {
+        Qubit::from_raw(i)
+    }
+    fn qs(indices: &[usize]) -> Vec<Qubit> {
+        indices.iter().map(|&i| q(i)).collect()
+    }
 
     fn run(circuit: &Circuit, n_qubits: usize) -> HashMap<String, Vec<Vec<bool>>> {
         let backend = Backend::new(n_qubits, None);
@@ -472,10 +488,10 @@ mod tests {
         use crate::circuits::adder;
 
         let m = 3;
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = adder::required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         // Build compute circuit: add 5 to sum register
@@ -489,15 +505,15 @@ mod tests {
 
         let mut full = Circuit::new();
         full += DefinitionBit::new("sum".to_string(), m, true);
-        full += PauliX::new(control); // control on
-                                      // sum starts at 3
-        full += PauliX::new(sum_qubits[0]);
-        full += PauliX::new(sum_qubits[1]);
+        full += PauliX::new(control.index()); // control on
+                                              // sum starts at 3
+        full += PauliX::new(sum_qubits[0].index());
+        full += PauliX::new(sum_qubits[1].index());
 
         full += wa;
 
-        for (i, &sq) in sum_qubits.iter().enumerate() {
-            full += MeasureQubit::new(sq, "sum".to_string(), i);
+        for (i, sq) in sum_qubits.iter().enumerate() {
+            full += MeasureQubit::new(sq.index(), "sum".to_string(), i);
         }
 
         let results = run(&full, total_qubits);
@@ -524,10 +540,10 @@ mod tests {
         use crate::circuits::adder;
 
         let m = 3;
-        let control = 0;
-        let sum_qubits: Vec<usize> = (1..=m).collect();
+        let control = q(0);
+        let sum_qubits = qs(&(1..=m).collect::<Vec<_>>());
         let scratch_count = adder::required_scratch(m);
-        let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
+        let scratch = qs(&(m + 1..m + 1 + scratch_count).collect::<Vec<_>>());
         let total_qubits = 1 + m + scratch_count;
 
         for k in 1..8u64 {
@@ -538,16 +554,16 @@ mod tests {
 
                 let mut circuit = Circuit::new();
                 circuit += DefinitionBit::new("s".to_string(), m, true);
-                circuit += PauliX::new(control);
-                for (i, &sq) in sum_qubits.iter().enumerate() {
+                circuit += PauliX::new(control.index());
+                for (i, sq) in sum_qubits.iter().enumerate() {
                     if (initial >> i) & 1 == 1 {
-                        circuit += PauliX::new(sq);
+                        circuit += PauliX::new(sq.index());
                     }
                 }
                 circuit += add_circuit;
                 circuit += inv;
-                for (i, &sq) in sum_qubits.iter().enumerate() {
-                    circuit += MeasureQubit::new(sq, "s".to_string(), i);
+                for (i, sq) in sum_qubits.iter().enumerate() {
+                    circuit += MeasureQubit::new(sq.index(), "s".to_string(), i);
                 }
 
                 let results = run(&circuit, total_qubits);
@@ -568,7 +584,7 @@ mod tests {
         let mut orig = Circuit::new();
         orig += PauliX::new(1);
 
-        let ctrl_circuit = controlled(&orig, 0, &[]).unwrap();
+        let ctrl_circuit = controlled(&orig, q(0), &[]).unwrap();
 
         // ctrl=|1⟩ → target should flip
         let mut full = Circuit::new();
@@ -596,7 +612,7 @@ mod tests {
         let mut orig = Circuit::new();
         orig += CNOT::new(1, 2);
 
-        let ctrl_circuit = controlled(&orig, 0, &[]).unwrap();
+        let ctrl_circuit = controlled(&orig, q(0), &[]).unwrap();
 
         // Both ctrl=|1⟩ and q1=|1⟩ → q2 flips
         let mut full = Circuit::new();
@@ -631,9 +647,9 @@ mod tests {
 
         let scratch_needed = controlled_scratch_required(&orig).unwrap();
         assert_eq!(scratch_needed, 1);
-        let scratch = vec![4];
+        let qs_scratch = qs(&[4]);
 
-        let ctrl_circuit = controlled(&orig, 0, &scratch).unwrap();
+        let ctrl_circuit = controlled(&orig, q(0), &qs_scratch).unwrap();
 
         // All three controls on → target flips
         let mut full = Circuit::new();
@@ -681,7 +697,7 @@ mod tests {
     fn test_controlled_unsupported_gate() {
         let mut c = Circuit::new();
         c += Hadamard::new(0);
-        assert!(controlled(&c, 1, &[]).is_err());
+        assert!(controlled(&c, q(1), &[]).is_err());
     }
 
     #[test]
@@ -691,7 +707,7 @@ mod tests {
         orig += PauliX::new(2);
         orig += CNOT::new(2, 3);
 
-        let ctrl = controlled(&orig, 0, &[]).unwrap();
+        let ctrl = controlled(&orig, q(0), &[]).unwrap();
 
         let mut full = Circuit::new();
         full += DefinitionBit::new("m".to_string(), 2, true);
@@ -710,7 +726,7 @@ mod tests {
         orig += PauliX::new(1);
         orig += CNOT::new(1, 2);
 
-        let ctrl = controlled(&orig, 0, &[]).unwrap();
+        let ctrl = controlled(&orig, q(0), &[]).unwrap();
         let inv = inverse(&ctrl).unwrap();
 
         let mut full = Circuit::new();

@@ -16,6 +16,7 @@ use roqoqo::Circuit;
 use crate::circuits::adder;
 use crate::circuits::multi_cz;
 use crate::circuits::transform;
+use crate::qubit::QubitRange;
 
 use super::Oracle;
 
@@ -107,7 +108,7 @@ impl Oracle for SubsetSumOracle {
         None // unknown — that's the whole point of quantum search
     }
 
-    fn apply(&self, circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
+    fn apply(&self, circuit: &mut Circuit, data_qubits: &QubitRange, ancillas: &QubitRange) {
         // ===================================================================
         // Subset-sum oracle circuit
         // ===================================================================
@@ -146,8 +147,10 @@ impl Oracle for SubsetSumOracle {
         // check runs. Each controlled_add fully uncomputes its MCX scratch.
 
         let m = self.sum_bits;
-        let sum_qubits = &ancillas[..m];
-        let scratch = &ancillas[m..];
+        let (sum_reg, scratch_reg) = ancillas.split_at(m);
+
+        // Materialize for &[Qubit] APIs (controlled_add takes ad-hoc slices)
+        let sum_qubits = sum_reg.to_qubits();
 
         // --- Compute: accumulate sum of selected elements ---
         let mut compute = Circuit::new();
@@ -156,29 +159,29 @@ impl Oracle for SubsetSumOracle {
                 continue;
             }
             let adder_scratch_needed = adder::required_scratch(m);
-            let adder_scratch = &scratch[..adder_scratch_needed];
+            let adder_scratch = scratch_reg.slice(..adder_scratch_needed).to_qubits();
             adder::controlled_add(
                 &mut compute,
-                data_qubits[i],
-                sum_qubits,
-                adder_scratch,
+                data_qubits.qubit(i),
+                &sum_qubits,
+                &adder_scratch,
                 elem,
             );
         }
 
         // --- Action: X-MCZ-X equality check (sum == T) ---
         let mut action = Circuit::new();
-        for (j, &sq) in sum_qubits.iter().enumerate() {
+        for (j, q) in sum_reg.iter().enumerate() {
             if (self.target >> j) & 1 == 0 {
-                action += PauliX::new(sq);
+                action += PauliX::new(q.index());
             }
         }
         let mcz_scratch_needed = multi_cz::required_ancillas(m);
-        let mcz_scratch = &scratch[..mcz_scratch_needed];
-        action += multi_cz::build_multi_cz(sum_qubits, mcz_scratch);
-        for (j, &sq) in sum_qubits.iter().enumerate() {
+        let mcz_scratch = scratch_reg.slice(..mcz_scratch_needed);
+        action += multi_cz::build_multi_cz(&sum_reg, &mcz_scratch);
+        for (j, q) in sum_reg.iter().enumerate() {
             if (self.target >> j) & 1 == 0 {
-                action += PauliX::new(sq);
+                action += PauliX::new(q.index());
             }
         }
 

@@ -10,6 +10,8 @@
 use roqoqo::operations::*;
 use roqoqo::Circuit;
 
+use crate::qubit::{Qubit, QubitAllocator};
+
 /// Build a QPE circuit.
 ///
 /// # Arguments
@@ -35,11 +37,12 @@ use roqoqo::Circuit;
 /// # Example
 /// ```no_run
 /// use algos::qpe::build_qpe_circuit;
+/// use algos::qubit::{Qubit, QubitRange};
 /// use roqoqo::operations::*;
 ///
 /// let circuit = build_qpe_circuit(4, &[4], |circuit, ctrl, k| {
 ///     if k == 0 {
-///         *circuit += ControlledPauliZ::new(ctrl, 4);
+///         *circuit += ControlledPauliZ::new(ctrl.index(), 4);
 ///     }
 /// });
 /// ```
@@ -49,7 +52,7 @@ pub fn build_qpe_circuit<F>(
     mut controlled_powers: F,
 ) -> Circuit
 where
-    F: FnMut(&mut Circuit, usize, usize),
+    F: FnMut(&mut Circuit, Qubit, usize),
 {
     assert!(n_counting >= 1, "need at least 1 counting qubit");
 
@@ -63,26 +66,29 @@ where
         );
     }
 
+    let mut alloc = QubitAllocator::new();
+    let counting = alloc.allocate("counting", n_counting);
+
     let mut circuit = Circuit::new();
     circuit += DefinitionBit::new("counting".to_string(), n_counting, true);
 
     // 1. Hadamard on all counting qubits
-    for i in 0..n_counting {
-        circuit += Hadamard::new(i);
+    for q in counting.iter() {
+        circuit += Hadamard::new(q.index());
     }
 
     // 2. Controlled-U^(2^k) for each counting qubit
     for k in 0..n_counting {
-        controlled_powers(&mut circuit, k, k);
+        controlled_powers(&mut circuit, counting.qubit(k), k);
     }
 
     // 3. Inverse QFT on counting register
-    let counting_qubits: Vec<usize> = (0..n_counting).collect();
-    circuit += QFT::new(counting_qubits, true, true);
+    let counting_indices: Vec<usize> = counting.iter().map(|q| q.index()).collect();
+    circuit += QFT::new(counting_indices, true, true);
 
     // 4. Measure counting register
-    for i in 0..n_counting {
-        circuit += MeasureQubit::new(i, "counting".to_string(), i);
+    for (i, q) in counting.iter().enumerate() {
+        circuit += MeasureQubit::new(q.index(), "counting".to_string(), i);
     }
 
     circuit
@@ -190,7 +196,7 @@ mod tests {
             // controlled-Z^(2^k): for Z gate, Z^(2^k) = I when k≥1, Z when k=0
             // Actually Z^2 = I, so Z^(2^k) = Z if k=0, I if k≥1
             if k == 0 {
-                *circuit += ControlledPauliZ::new(ctrl, work);
+                *circuit += ControlledPauliZ::new(ctrl.index(), work);
             }
         });
         full += qpe;
