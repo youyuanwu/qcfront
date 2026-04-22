@@ -1,0 +1,36 @@
+name: build
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows-latest, ubuntu-latest ]
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Read rust version from rust-toolchain.toml
+      id: rust-version
+      run: |
+        RUST_VERSION=$(grep '^channel' rust-toolchain.toml | sed 's/.*"\(.*\)"/\1/')
+        echo "version=$RUST_VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Install rust ${{ steps.rust-version.outputs.version }}
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ steps.rust-version.outputs.version }}
+        components: rustfmt, clippy
+
+    - name: Run cargo check
+      run: cargo check
+
+    - name: Run cargo fmt
+      run: cargo fmt --all -- --check
+    
+    - name: Run cargo clippy
+      run: cargo clippy --all-targets -- -D warnings
+    
+    - name: Run cargo test
+      run: cargo test --all -- --nocapture
