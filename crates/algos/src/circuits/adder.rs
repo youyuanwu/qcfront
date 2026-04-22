@@ -4,8 +4,7 @@
 //! quantum register `sum[0..m-1]`, controlled by a single qubit. Uses an
 //! MCX-cascade incrementer — no carry register needed.
 //!
-//! The inverse [`controlled_add_inverse`] undoes the addition, restoring
-//! the sum register to its original value.
+//! The inverse can be obtained via [`super::transform::inverse`].
 //!
 //! This is a domain-independent arithmetic primitive used by
 //! [`crate::grover::SubsetSumOracle`] and potentially other algorithms
@@ -88,53 +87,6 @@ pub fn controlled_add(
         }
         // Flip bit j itself
         *circuit += CNOT::new(control, sum_qubits[j]);
-    }
-}
-
-/// Build the inverse of [`controlled_add`]: subtract classical `k` from
-/// the sum register, controlled by `control`.
-///
-/// Reverses both the bit iteration order (LSB to MSB) and the gate
-/// order within each bit.
-pub fn controlled_add_inverse(
-    circuit: &mut Circuit,
-    control: usize,
-    sum_qubits: &[usize],
-    scratch: &[usize],
-    k: u64,
-) {
-    let m = sum_qubits.len();
-    assert!(m >= 1, "sum_qubits must not be empty");
-    assert!(
-        k < (1u64 << m),
-        "k={} overflows {}-bit sum register (max {})",
-        k,
-        m,
-        (1u64 << m) - 1
-    );
-
-    if k == 0 {
-        return;
-    }
-
-    // Process set bits from LSB to MSB (reverse of forward)
-    for j in 0..m {
-        if (k >> j) & 1 == 0 {
-            continue;
-        }
-        // Undo CNOT on bit j first (reverse gate order)
-        *circuit += CNOT::new(control, sum_qubits[j]);
-        // Undo carry cascade from j+1 up to MSB (reverse of descending)
-        for p in j + 1..m {
-            let num_sum_controls = p - j;
-            let nc = 1 + num_sum_controls;
-            let mut controls = Vec::with_capacity(nc);
-            controls.push(control);
-            controls.extend(sum_qubits[j..p].iter().copied());
-            let mcx_anc_needed = required_ancillas(nc);
-            let mcx_scratch = &scratch[..mcx_anc_needed];
-            *circuit += build_multi_cx(sum_qubits[p], &controls, mcx_scratch);
-        }
     }
 }
 
@@ -276,6 +228,8 @@ mod tests {
     /// Verify that add followed by inverse restores original sum.
     #[test]
     fn test_add_inverse_roundtrip() {
+        use super::super::transform::inverse;
+
         let m = 4;
         let control = 0;
         let sum_qubits: Vec<usize> = (1..=m).collect();
@@ -283,13 +237,17 @@ mod tests {
         let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
         let total_qubits = 1 + m + scratch_count;
 
-        // Test: add k=5 to sum=3, then inverse → should get 3 back
         let initial = 3u64;
         let k = 5u64;
 
+        // Build add circuit, then use inverse() to undo it
+        let mut add_circuit = Circuit::new();
+        controlled_add(&mut add_circuit, control, &sum_qubits, &scratch, k);
+        let inv = inverse(&add_circuit).unwrap();
+
         let mut circuit = Circuit::new();
         circuit += DefinitionBit::new("sum".to_string(), m, true);
-        circuit += PauliX::new(control); // control on
+        circuit += PauliX::new(control);
 
         for (i, &sq) in sum_qubits.iter().enumerate() {
             if (initial >> i) & 1 == 1 {
@@ -297,8 +255,8 @@ mod tests {
             }
         }
 
-        controlled_add(&mut circuit, control, &sum_qubits, &scratch, k);
-        controlled_add_inverse(&mut circuit, control, &sum_qubits, &scratch, k);
+        circuit += add_circuit;
+        circuit += inv;
 
         for (i, &sq) in sum_qubits.iter().enumerate() {
             circuit += MeasureQubit::new(sq, "sum".to_string(), i);
@@ -308,10 +266,12 @@ mod tests {
         assert_eq!(read_register(&results, "sum", m), initial);
     }
 
-    /// Exhaustive test: verify add + inverse = identity for all initial
+    /// Exhaustive test: verify add + inverse() = identity for all initial
     /// sums and several k values with m=3.
     #[test]
     fn test_add_inverse_exhaustive_m3() {
+        use super::super::transform::inverse;
+
         let m = 3;
         let control = 0;
         let sum_qubits: Vec<usize> = (1..=m).collect();
@@ -321,6 +281,10 @@ mod tests {
 
         for k in 1..8u64 {
             for initial in 0..8u64 {
+                let mut add_circuit = Circuit::new();
+                controlled_add(&mut add_circuit, control, &sum_qubits, &scratch, k);
+                let inv = inverse(&add_circuit).unwrap();
+
                 let mut circuit = Circuit::new();
                 circuit += DefinitionBit::new("sum".to_string(), m, true);
                 circuit += PauliX::new(control);
@@ -331,8 +295,8 @@ mod tests {
                     }
                 }
 
-                controlled_add(&mut circuit, control, &sum_qubits, &scratch, k);
-                controlled_add_inverse(&mut circuit, control, &sum_qubits, &scratch, k);
+                circuit += add_circuit;
+                circuit += inv;
 
                 for (i, &sq) in sum_qubits.iter().enumerate() {
                     circuit += MeasureQubit::new(sq, "sum".to_string(), i);

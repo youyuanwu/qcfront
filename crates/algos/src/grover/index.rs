@@ -10,6 +10,7 @@ use roqoqo::operations::*;
 use roqoqo::Circuit;
 
 use crate::circuits::multi_cz::{build_multi_cz, required_ancillas};
+use crate::circuits::transform;
 
 use super::Oracle;
 
@@ -124,20 +125,19 @@ fn apply_target_oracle(
     ancillas: &[usize],
     target: usize,
 ) {
-    // Apply X to qubits where target bit is 0
+    // Compute: X on qubits where target bit is 0 (remap |target⟩ → |11…1⟩)
+    let mut compute = Circuit::new();
     for (i, &q) in data_qubits.iter().enumerate() {
         if (target >> i) & 1 == 0 {
-            *circuit += PauliX::new(q);
+            compute += PauliX::new(q);
         }
     }
 
-    // Multi-controlled-Z: flips phase of |11…1⟩ (which is |target⟩ after X gates)
-    *circuit += build_multi_cz(data_qubits, ancillas);
+    // Action: MCZ flips phase of |11…1⟩ (which is |target⟩ after remapping)
+    let mut action = Circuit::new();
+    action += build_multi_cz(data_qubits, ancillas);
 
-    // Undo X gates
-    for (i, &q) in data_qubits.iter().enumerate() {
-        if (target >> i) & 1 == 0 {
-            *circuit += PauliX::new(q);
-        }
-    }
+    // compute → action → inverse(compute)
+    *circuit +=
+        transform::within_apply(&compute, &action).expect("index oracle compute uses only X gates");
 }

@@ -31,6 +31,7 @@ use roqoqo::operations::*;
 use roqoqo::Circuit;
 
 use crate::circuits::multi_cz::{build_multi_cz, required_ancillas};
+use crate::circuits::transform;
 use crate::runner::QuantumRunner;
 
 // ---------------------------------------------------------------------------
@@ -325,26 +326,22 @@ fn build_grover_circuit<O: Oracle + ?Sized>(
 /// Implements −(2|s⟩⟨s| − I) = I − 2|s⟩⟨s| via H-X-MCZ-X-H.
 /// Equivalent to 2|s⟩⟨s| − I up to global phase (unobservable).
 fn build_diffuser(circuit: &mut Circuit, data_qubits: &[usize], ancillas: &[usize]) {
-    // H on all data qubits
+    // Compute: H then X on all data qubits
+    let mut compute = Circuit::new();
     for &q in data_qubits {
-        *circuit += Hadamard::new(q);
+        compute += Hadamard::new(q);
     }
-    // X on all data qubits
     for &q in data_qubits {
-        *circuit += PauliX::new(q);
+        compute += PauliX::new(q);
     }
 
-    // Multi-controlled-Z
-    *circuit += build_multi_cz(data_qubits, ancillas);
+    // Action: MCZ
+    let mut action = Circuit::new();
+    action += build_multi_cz(data_qubits, ancillas);
 
-    // X on all data qubits
-    for &q in data_qubits {
-        *circuit += PauliX::new(q);
-    }
-    // H on all data qubits
-    for &q in data_qubits {
-        *circuit += Hadamard::new(q);
-    }
+    // H·X → MCZ → X·H (automatic via within_apply)
+    *circuit += transform::within_apply(&compute, &action)
+        .expect("diffuser compute uses only H and X gates");
 }
 
 /// Compute optimal number of Grover iterations.

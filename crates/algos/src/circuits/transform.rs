@@ -1,7 +1,8 @@
 //! Circuit transformation utilities.
 //!
 //! Higher-level operations on roqoqo [`Circuit`]s: [`inverse`] reverses a
-//! circuit, [`within_apply`] automates compute → action → uncompute, and
+//! circuit, [`within_apply`] automates compute → action → uncompute,
+//! [`controlled`] adds a control qubit to every gate, and
 //! [`is_unitary`] checks whether a circuit contains only reversible gates.
 //!
 //! These are **circuit-to-circuit meta-utilities**, distinct from the gate
@@ -123,6 +124,115 @@ fn invert_gate(op: &Operation) -> Result<Circuit, UnsupportedGate> {
         // SqrtPauliX: inverse is InvSqrtPauliX and vice versa
         Operation::SqrtPauliX(g) => c += InvSqrtPauliX::new(*g.qubit()),
         Operation::InvSqrtPauliX(g) => c += SqrtPauliX::new(*g.qubit()),
+
+        other => {
+            return Err(UnsupportedGate {
+                gate_name: format!("{:?}", other)
+                    .split('(')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            });
+        }
+    }
+
+    Ok(c)
+}
+
+/// Add a control qubit to every gate in a circuit.
+///
+/// Each gate is promoted by one control level:
+/// - `PauliX(t)` → `CNOT(ctrl, t)`
+/// - `CNOT(c, t)` → `Toffoli(t, ctrl, c)`
+/// - `Toffoli(t, c0, c1)` → `MCX(target=t, controls=[ctrl, c0, c1], scratch)`
+///
+/// **Scope limitation**: only supports PauliX, CNOT, and Toffoli.
+/// Returns `UnsupportedGate` for other gate types. This covers the
+/// primary use case: adding a control to adder circuits (which contain
+/// only CNOT and Toffoli from MCX decomposition).
+///
+/// # Arguments
+/// * `circuit` — the circuit to wrap with a control
+/// * `control` — the qubit that enables/disables all gates
+/// * `scratch` — MCX decomposition scratch; must have
+///   `scratch.len() >= controlled_scratch_required(circuit)`
+pub fn controlled(
+    circuit: &Circuit,
+    control: usize,
+    scratch: &[usize],
+) -> Result<Circuit, UnsupportedGate> {
+    let mut result = Circuit::new();
+
+    for op in circuit.iter() {
+        result += promote_gate(op, control, scratch)?;
+    }
+
+    Ok(result)
+}
+
+/// Compute how many scratch qubits [`controlled`] needs for a circuit.
+///
+/// Scans the circuit for the maximum control count after promotion
+/// and returns the MCX ancilla requirement.
+pub fn controlled_scratch_required(circuit: &Circuit) -> Result<usize, UnsupportedGate> {
+    let mut max_scratch = 0usize;
+    for op in circuit.iter() {
+        let needed = match op {
+            Operation::PauliX(_) => 0, // → CNOT (no scratch)
+            Operation::CNOT(_) => 0,   // → Toffoli (no scratch)
+            Operation::Toffoli(_) => {
+                // → MCX with 3 controls, needs required_ancillas(3) = 1
+                super::multi_cx::required_ancillas(3)
+            }
+            other => {
+                return Err(UnsupportedGate {
+                    gate_name: format!("{:?}", other)
+                        .split('(')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                });
+            }
+        };
+        max_scratch = max_scratch.max(needed);
+    }
+    Ok(max_scratch)
+}
+
+/// Promote a single gate by adding one control qubit.
+fn promote_gate(
+    op: &Operation,
+    control: usize,
+    scratch: &[usize],
+) -> Result<Circuit, UnsupportedGate> {
+    let mut c = Circuit::new();
+
+    match op {
+        // X(t) → CNOT(ctrl, t)
+        Operation::PauliX(g) => {
+            c += CNOT::new(control, *g.qubit());
+        }
+
+        // CNOT(c0, t) → Toffoli(t, ctrl, c0)
+        Operation::CNOT(g) => {
+            c += Toffoli::new(*g.target(), control, *g.control());
+        }
+
+        // Toffoli(t, c0, c1) → MCX(target=t, controls=[ctrl, c0, c1], scratch)
+        Operation::Toffoli(g) => {
+            // roqoqo struct stores fields as (control_0, control_1, target) but
+            // our codebase convention is Toffoli::new(target, ctrl0, ctrl1) where
+            // the first arg to new() goes to the control_0 field. So:
+            //   physical target = g.control_0() (first arg to new)
+            //   physical ctrl0  = g.control_1() (second arg)
+            //   physical ctrl1  = g.target()    (third arg)
+            // MCX: flip physical target when all controls (incl. new ctrl) are |1⟩
+            let mcx_target = *g.control_0();
+            let mcx_controls = vec![control, *g.control_1(), *g.target()];
+            let mcx_scratch_needed = super::multi_cx::required_ancillas(mcx_controls.len());
+            let mcx_scratch = &scratch[..mcx_scratch_needed];
+            c += super::multi_cx::build_multi_cx(mcx_target, &mcx_controls, mcx_scratch);
+        }
 
         other => {
             return Err(UnsupportedGate {
@@ -407,10 +517,10 @@ mod tests {
         assert_eq!(result.iter().count(), 1);
     }
 
-    // --- inverse matches hand-written controlled_add_inverse ---
+    // --- inverse restores adder state (exhaustive) ---
 
     #[test]
-    fn test_inverse_matches_handwritten_adder() {
+    fn test_inverse_adder_exhaustive() {
         use crate::circuits::adder;
 
         let m = 3;
@@ -420,55 +530,199 @@ mod tests {
         let scratch: Vec<usize> = (m + 1..m + 1 + scratch_count).collect();
         let total_qubits = 1 + m + scratch_count;
 
-        // For all initial sums and k values, verify inverse() matches
-        // the hand-written controlled_add_inverse
         for k in 1..8u64 {
             for initial in 0..8u64 {
-                // Method 1: hand-written inverse
-                let mut c1 = Circuit::new();
-                c1 += DefinitionBit::new("s1".to_string(), m, true);
-                c1 += PauliX::new(control);
-                for (i, &sq) in sum_qubits.iter().enumerate() {
-                    if (initial >> i) & 1 == 1 {
-                        c1 += PauliX::new(sq);
-                    }
-                }
-                adder::controlled_add(&mut c1, control, &sum_qubits, &scratch, k);
-                adder::controlled_add_inverse(&mut c1, control, &sum_qubits, &scratch, k);
-                for (i, &sq) in sum_qubits.iter().enumerate() {
-                    c1 += MeasureQubit::new(sq, "s1".to_string(), i);
-                }
-
-                // Method 2: inverse() utility
                 let mut add_circuit = Circuit::new();
                 adder::controlled_add(&mut add_circuit, control, &sum_qubits, &scratch, k);
                 let inv = inverse(&add_circuit).unwrap();
 
-                let mut c2 = Circuit::new();
-                c2 += DefinitionBit::new("s2".to_string(), m, true);
-                c2 += PauliX::new(control);
+                let mut circuit = Circuit::new();
+                circuit += DefinitionBit::new("s".to_string(), m, true);
+                circuit += PauliX::new(control);
                 for (i, &sq) in sum_qubits.iter().enumerate() {
                     if (initial >> i) & 1 == 1 {
-                        c2 += PauliX::new(sq);
+                        circuit += PauliX::new(sq);
                     }
                 }
-                adder::controlled_add(&mut c2, control, &sum_qubits, &scratch, k);
-                c2 += inv;
+                circuit += add_circuit;
+                circuit += inv;
                 for (i, &sq) in sum_qubits.iter().enumerate() {
-                    c2 += MeasureQubit::new(sq, "s2".to_string(), i);
+                    circuit += MeasureQubit::new(sq, "s".to_string(), i);
                 }
 
-                let r1 = run(&c1, total_qubits);
-                let r2 = run(&c2, total_qubits);
-                let v1 = read_register(&r1, "s1", m);
-                let v2 = read_register(&r2, "s2", m);
+                let results = run(&circuit, total_qubits);
+                let result = read_register(&results, "s", m);
                 assert_eq!(
-                    v1, v2,
-                    "inverse() disagrees with hand-written for k={}, initial={}: {} vs {}",
-                    k, initial, v1, v2
+                    result, initial,
+                    "inverse() roundtrip failed: initial={}, k={}, got={}",
+                    initial, k, result
                 );
-                assert_eq!(v1, initial); // both should restore original
             }
         }
+    }
+
+    // --- controlled ---
+
+    #[test]
+    fn test_controlled_x_becomes_cnot() {
+        let mut orig = Circuit::new();
+        orig += PauliX::new(1);
+
+        let ctrl_circuit = controlled(&orig, 0, &[]).unwrap();
+
+        // ctrl=|1⟩ → target should flip
+        let mut full = Circuit::new();
+        full += DefinitionBit::new("m".to_string(), 2, true);
+        full += PauliX::new(0);
+        full += ctrl_circuit.clone();
+        full += MeasureQubit::new(1, "m".to_string(), 0);
+        let results = run(&full, 2);
+        assert!(results["m"][0][0], "controlled X should flip when ctrl=1");
+
+        // ctrl=|0⟩ → target should stay
+        let mut full2 = Circuit::new();
+        full2 += DefinitionBit::new("m".to_string(), 2, true);
+        full2 += ctrl_circuit;
+        full2 += MeasureQubit::new(1, "m".to_string(), 0);
+        let results2 = run(&full2, 2);
+        assert!(
+            !results2["m"][0][0],
+            "controlled X should not flip when ctrl=0"
+        );
+    }
+
+    #[test]
+    fn test_controlled_cnot_becomes_toffoli() {
+        let mut orig = Circuit::new();
+        orig += CNOT::new(1, 2);
+
+        let ctrl_circuit = controlled(&orig, 0, &[]).unwrap();
+
+        // Both ctrl=|1⟩ and q1=|1⟩ → q2 flips
+        let mut full = Circuit::new();
+        full += DefinitionBit::new("m".to_string(), 1, true);
+        full += PauliX::new(0);
+        full += PauliX::new(1);
+        full += ctrl_circuit.clone();
+        full += MeasureQubit::new(2, "m".to_string(), 0);
+        let results = run(&full, 3);
+        assert!(
+            results["m"][0][0],
+            "controlled CNOT should flip when both controls=1"
+        );
+
+        // Only q1=|1⟩ (ctrl=|0⟩) → q2 stays
+        let mut full2 = Circuit::new();
+        full2 += DefinitionBit::new("m".to_string(), 1, true);
+        full2 += PauliX::new(1);
+        full2 += ctrl_circuit;
+        full2 += MeasureQubit::new(2, "m".to_string(), 0);
+        let results2 = run(&full2, 3);
+        assert!(
+            !results2["m"][0][0],
+            "controlled CNOT should not flip when ctrl=0"
+        );
+    }
+
+    #[test]
+    fn test_controlled_toffoli_becomes_mcx() {
+        let mut orig = Circuit::new();
+        orig += Toffoli::new(3, 1, 2);
+
+        let scratch_needed = controlled_scratch_required(&orig).unwrap();
+        assert_eq!(scratch_needed, 1);
+        let scratch = vec![4];
+
+        let ctrl_circuit = controlled(&orig, 0, &scratch).unwrap();
+
+        // All three controls on → target flips
+        let mut full = Circuit::new();
+        full += DefinitionBit::new("m".to_string(), 1, true);
+        full += PauliX::new(0);
+        full += PauliX::new(1);
+        full += PauliX::new(2);
+        full += ctrl_circuit.clone();
+        full += MeasureQubit::new(3, "m".to_string(), 0);
+        let results = run(&full, 5);
+        assert!(
+            results["m"][0][0],
+            "controlled Toffoli should flip when all 3 controls=1"
+        );
+
+        // Missing one control → no flip
+        let mut full2 = Circuit::new();
+        full2 += DefinitionBit::new("m".to_string(), 1, true);
+        full2 += PauliX::new(0);
+        full2 += PauliX::new(1);
+        full2 += ctrl_circuit;
+        full2 += MeasureQubit::new(3, "m".to_string(), 0);
+        let results2 = run(&full2, 5);
+        assert!(
+            !results2["m"][0][0],
+            "controlled Toffoli should not flip when one control=0"
+        );
+    }
+
+    #[test]
+    fn test_controlled_scratch_required_empty() {
+        assert_eq!(controlled_scratch_required(&Circuit::new()).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_controlled_scratch_required_mixed() {
+        let mut c = Circuit::new();
+        c += PauliX::new(0);
+        c += CNOT::new(0, 1);
+        c += Toffoli::new(2, 0, 1);
+        assert_eq!(controlled_scratch_required(&c).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_controlled_unsupported_gate() {
+        let mut c = Circuit::new();
+        c += Hadamard::new(0);
+        assert!(controlled(&c, 1, &[]).is_err());
+    }
+
+    #[test]
+    fn test_controlled_multi_gate_circuit() {
+        // X(2) + CNOT(2,3) controlled by q0: flips q2, copies to q3
+        let mut orig = Circuit::new();
+        orig += PauliX::new(2);
+        orig += CNOT::new(2, 3);
+
+        let ctrl = controlled(&orig, 0, &[]).unwrap();
+
+        let mut full = Circuit::new();
+        full += DefinitionBit::new("m".to_string(), 2, true);
+        full += PauliX::new(0);
+        full += ctrl;
+        full += MeasureQubit::new(2, "m".to_string(), 0);
+        full += MeasureQubit::new(3, "m".to_string(), 1);
+        let results = run(&full, 4);
+        assert_eq!(read_register(&results, "m", 2), 3);
+    }
+
+    #[test]
+    fn test_controlled_inverse_roundtrip() {
+        // controlled(circuit) then inverse(controlled(circuit)) = identity
+        let mut orig = Circuit::new();
+        orig += PauliX::new(1);
+        orig += CNOT::new(1, 2);
+
+        let ctrl = controlled(&orig, 0, &[]).unwrap();
+        let inv = inverse(&ctrl).unwrap();
+
+        let mut full = Circuit::new();
+        full += DefinitionBit::new("m".to_string(), 3, true);
+        full += PauliX::new(0);
+        full += ctrl;
+        full += inv;
+        for i in 0..3 {
+            full += MeasureQubit::new(i, "m".to_string(), i);
+        }
+        let results = run(&full, 3);
+        assert!(!results["m"][0][1], "q1 should be 0 after roundtrip");
+        assert!(!results["m"][0][2], "q2 should be 0 after roundtrip");
     }
 }
