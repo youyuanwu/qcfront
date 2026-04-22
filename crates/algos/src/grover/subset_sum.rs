@@ -15,6 +15,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::adder;
 use crate::circuits::multi_cz;
+use crate::circuits::transform;
 
 use super::Oracle;
 
@@ -112,9 +113,30 @@ impl Oracle for SubsetSumOracle {
         // ===================================================================
         //
         // Evaluates f(x) = 1 iff Σ(sᵢ where xᵢ=1) == T on a superposition
-        // of all 2^n inclusion/exclusion combinations.
+        // of all 2^n inclusion/exclusion combinations. Each data qubit i
+        // represents "include element sᵢ".
         //
-        // Ancilla layout:
+        // ===================================================================
+        // Circuit strategy: compute → phase-flip → uncompute
+        // ===================================================================
+        //
+        // Compute: for each element, controlled_add(data[i], sum, scratch, sᵢ)
+        //   accumulates the sum of selected elements into the sum register.
+        //   The MCX-cascade adder adds a classical constant k controlled by
+        //   one qubit — no carry register needed.
+        //
+        // Action: X-MCZ-X equality check on the sum register.
+        //   X on zero-bits of T maps |T⟩ → |11…1⟩, MCZ flips phase of
+        //   |11…1⟩ only, then X undoes the mapping. Net effect: phase flip
+        //   iff sum == T. The X gates self-cancel so sum register is unchanged.
+        //
+        // Uncompute: automatic via within_apply — reverses all controlled
+        //   additions, restoring the sum register to |0⟩.
+        //
+        // ===================================================================
+        // Ancilla layout
+        // ===================================================================
+        //
         //   [sum_0, sum_1, ..., sum_{m-1}, scratch...]
         //   ├── sum accumulator register ──┤├─ shared ──┤
         //
@@ -128,42 +150,41 @@ impl Oracle for SubsetSumOracle {
         let scratch = &ancillas[m..];
 
         // --- Compute: accumulate sum of selected elements ---
+        let mut compute = Circuit::new();
         for (i, &elem) in self.elements.iter().enumerate() {
-            if elem == 0 {
-                continue; // no-op addition (zero has no set bits)
-            }
-            let adder_scratch_needed = adder::required_scratch(m);
-            let adder_scratch = &scratch[..adder_scratch_needed];
-            adder::controlled_add(circuit, data_qubits[i], sum_qubits, adder_scratch, elem);
-        }
-
-        // --- Phase flip: X-MCZ-X equality check (sum == T) ---
-        // Apply X to each sum qubit where T has a 0-bit, mapping |T⟩ → |11…1⟩
-        for (j, &sq) in sum_qubits.iter().enumerate() {
-            if (self.target >> j) & 1 == 0 {
-                *circuit += PauliX::new(sq);
-            }
-        }
-        // MCZ flips phase of |11…1⟩ (= |T⟩ after X remapping)
-        let mcz_scratch_needed = multi_cz::required_ancillas(m);
-        let mcz_scratch = &scratch[..mcz_scratch_needed];
-        *circuit += multi_cz::build_multi_cz(sum_qubits, mcz_scratch);
-        // Undo X gates
-        for (j, &sq) in sum_qubits.iter().enumerate() {
-            if (self.target >> j) & 1 == 0 {
-                *circuit += PauliX::new(sq);
-            }
-        }
-
-        // --- Uncompute: reverse all additions ---
-        for (i, &elem) in self.elements.iter().enumerate().rev() {
             if elem == 0 {
                 continue;
             }
             let adder_scratch_needed = adder::required_scratch(m);
             let adder_scratch = &scratch[..adder_scratch_needed];
-            adder::controlled_add_inverse(circuit, data_qubits[i], sum_qubits, adder_scratch, elem);
+            adder::controlled_add(
+                &mut compute,
+                data_qubits[i],
+                sum_qubits,
+                adder_scratch,
+                elem,
+            );
         }
+
+        // --- Action: X-MCZ-X equality check (sum == T) ---
+        let mut action = Circuit::new();
+        for (j, &sq) in sum_qubits.iter().enumerate() {
+            if (self.target >> j) & 1 == 0 {
+                action += PauliX::new(sq);
+            }
+        }
+        let mcz_scratch_needed = multi_cz::required_ancillas(m);
+        let mcz_scratch = &scratch[..mcz_scratch_needed];
+        action += multi_cz::build_multi_cz(sum_qubits, mcz_scratch);
+        for (j, &sq) in sum_qubits.iter().enumerate() {
+            if (self.target >> j) & 1 == 0 {
+                action += PauliX::new(sq);
+            }
+        }
+
+        // compute → action → inverse(compute)
+        *circuit += transform::within_apply(&compute, &action)
+            .expect("subset sum compute circuit uses only supported gates");
     }
 }
 

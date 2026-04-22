@@ -13,6 +13,7 @@ use roqoqo::Circuit;
 
 use crate::circuits::multi_cx;
 use crate::circuits::multi_cz;
+use crate::circuits::transform;
 use crate::sat::Clause;
 
 use super::Oracle;
@@ -158,16 +159,11 @@ impl Oracle for CnfOracle {
         //
         //   |x⟩ → (-1)^f(x) |x⟩
         //
-        // A satisfying assignment is one where f(x) = 1 (all clauses true).
-        // After the oracle, Grover's diffuser amplifies the negative-phase
-        // states, making them more likely to be measured.
-        //
         // ===================================================================
         // How the circuit evaluates the formula
         // ===================================================================
         //
-        // Classical logic has no direct quantum gate equivalents. We build
-        // boolean functions from reversible primitives:
+        // Classical logic → reversible gates:
         //
         //   Logic op  │ Quantum gate(s)        │ Notes
         //   ──────────┼────────────────────────┼──────────────────────────
@@ -178,124 +174,85 @@ impl Oracle for CnfOracle {
         //   NOR(a,b)  │ X+Toffoli+X            │ AND of inverted inputs
         //   phase AND │ MCZ(qubits)            │ flips phase, not value
         //
-        // Key constraint: quantum gates are reversible — AND can't discard
-        // an input bit. Instead, Toffoli writes the result into a separate
-        // target (ancilla) qubit while preserving both inputs.
-        //
         // The circuit mirrors the CNF structure directly:
         //   - One ancilla per clause → evaluates the OR (via De Morgan)
         //   - One final MCZ across all clause ancillas → evaluates the AND
         //
         //   CNF: (clause₁) ∧ (clause₂) ∧ ... ∧ (clauseₖ)
         //            ↓           ↓                 ↓
-        //         ancilla₁   ancilla₂   ...    ancillaₖ   ← each = 1 if clause satisfied
+        //         ancilla₁   ancilla₂   ...    ancillaₖ   ← 1 if clause satisfied
         //            └───────────┼─────────────────┘
         //                     MCZ  ← phase flip if ALL ancillas = 1
         //
         // Each clause OR is computed using De Morgan's law:
         //   l₁ ∨ l₂ ∨ ... ∨ lₖ  =  ¬(¬l₁ ∧ ¬l₂ ∧ ... ∧ ¬lₖ)
         //
-        // This converts OR (no direct quantum gate) into AND (MCX) + NOT (X),
-        // both of which we have. The formula's top-level structure stays CNF —
-        // we are NOT converting CNF to DNF.
-        //
         // ===================================================================
         // Per-clause steps (example: clause (x₁ ∨ ¬x₂))
         // ===================================================================
         //
-        //   1. X on un-negated vars: maps each qubit to NOT(literal_value).
-        //      After X, qubit=1 iff the literal is false.
-        //        positive literal x₁:  false means x₁=0, X maps to 1  ✓
-        //        negated literal ¬x₂:  false means x₂=1, already 1    ✓
-        //
-        //   2. MCX → clause_ancilla: AND of all flipped qubits.
-        //      Fires when ALL literals are false → ancilla = NOR(literals).
-        //
-        //   3. Undo X gates (restore data qubits to original values).
-        //
-        //   4. X on clause_ancilla: inverts NOR → OR.
-        //      Now ancilla = 1 iff clause is satisfied.
-        //
-        // After all clauses: MCZ on clause ancillas flips phase when
-        // ALL ancillas are 1 (= all clauses satisfied = formula satisfied).
-        //
-        // Finally, uncompute all clause ancillas in reverse order so they
-        // return to |0⟩ for the next Grover iteration.
+        //   1. X on un-negated vars → qubit=1 iff literal is false
+        //   2. MCX → clause_ancilla = NOR(literals)
+        //   3. Undo X gates (restore data qubits)
+        //   4. X on clause_ancilla → invert NOR to OR
         //
         // ===================================================================
-        // Ancilla layout
+        // Structure: within_apply(compute, action)
         // ===================================================================
         //
+        // Compute: evaluate all clauses into their ancillas (steps 1–4)
+        // Action:  MCZ across clause ancillas (phase flip if satisfied)
+        // Uncompute: automatic via inverse(compute) — within_apply handles this
+        //
+        // Ancilla layout:
         //   [clause₀, clause₁, ..., clause_{c-1}, scratch...]
         //   ├── clause results ──────────────────┤├─ reusable ─┤
         //
         // Scratch is shared: MCX scratch reuses across sequential clauses
-        // (each clause uncomputes its MCX before the next). The final MCZ
-        // reuses the same scratch region (clause ancillas hold live values
-        // during MCZ, so they can't serve as MCZ scratch).
+        // (each MCX uncomputes its V-chain). The final MCZ reuses the
+        // same pool (temporally disjoint from clause evaluation).
 
         let c = self.clauses.len();
         let clause_ancillas = &ancillas[..c];
         let scratch = &ancillas[c..];
 
         // --- Compute: evaluate each clause into its ancilla ---
+        let mut compute = Circuit::new();
         for (i, clause) in self.clauses.iter().enumerate() {
             let controls: Vec<usize> = clause.iter().map(|lit| data_qubits[lit.qubit()]).collect();
 
-            // Step 1: X on un-negated variables — after X, qubit=1 means "literal is false"
+            // X on un-negated variables
             for lit in clause {
                 if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]);
+                    compute += PauliX::new(data_qubits[lit.qubit()]);
                 }
             }
 
-            // Step 2: MCX → clause ancilla = AND(all-false) = NOR(literals)
+            // MCX → clause ancilla = NOR(literals)
             let mcx_scratch_needed = multi_cx::required_ancillas(controls.len());
             let mcx_ancillas = &scratch[..mcx_scratch_needed];
-            *circuit += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas);
+            compute += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas);
 
-            // Step 3: undo X gates (restore data qubits to original values)
+            // Undo X gates
             for lit in clause {
                 if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]);
+                    compute += PauliX::new(data_qubits[lit.qubit()]);
                 }
             }
 
-            // Step 4: X on clause ancilla — invert NOR to OR
-            // Now ancilla_i = 1 iff clause_i is satisfied
-            *circuit += PauliX::new(clause_ancillas[i]);
+            // X on clause ancilla — invert NOR to OR
+            compute += PauliX::new(clause_ancillas[i]);
         }
 
-        // --- Phase flip: MCZ on all clause ancillas ---
-        // Flips phase iff ALL clause ancillas are 1 (= formula satisfied)
+        // --- Action: MCZ on all clause ancillas ---
+        let mut action = Circuit::new();
         let mcz_scratch_needed = multi_cz::required_ancillas(c);
         let mcz_ancillas = &scratch[..mcz_scratch_needed];
-        *circuit += multi_cz::build_multi_cz(clause_ancillas, mcz_ancillas);
+        action += multi_cz::build_multi_cz(clause_ancillas, mcz_ancillas);
 
-        // --- Uncompute: reverse clause evaluation (in reverse order) ---
-        // Restores all clause ancillas to |0⟩ so the diffuser operates
-        // only on the data qubit subspace.
-        for (i, clause) in self.clauses.iter().enumerate().rev() {
-            let controls: Vec<usize> = clause.iter().map(|lit| data_qubits[lit.qubit()]).collect();
-
-            *circuit += PauliX::new(clause_ancillas[i]); // undo step 4
-
-            for lit in clause {
-                if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]); // redo step 1
-                }
-            }
-
-            let mcx_scratch_needed = multi_cx::required_ancillas(controls.len());
-            let mcx_ancillas = &scratch[..mcx_scratch_needed];
-            *circuit += multi_cx::build_multi_cx(clause_ancillas[i], &controls, mcx_ancillas); // undo step 2
-
-            for lit in clause {
-                if !lit.is_negated() {
-                    *circuit += PauliX::new(data_qubits[lit.qubit()]); // undo step 1
-                }
-            }
-        }
+        // compute → action → inverse(compute)
+        *circuit += transform::within_apply(&compute, &action)
+            .expect("CNF compute circuit uses only supported gates");
     }
 }
 
