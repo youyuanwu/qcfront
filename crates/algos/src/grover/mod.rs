@@ -11,14 +11,17 @@
 //! The [`Oracle`] trait abstracts over different marking strategies.
 //! [`IndexOracle`] marks states by index (simple, solution set known).
 //! [`CnfOracle`] evaluates CNF formulas reversibly (circuit-based, no
-//! classical pre-solving).
+//! classical pre-solving). [`SubsetSumOracle`] evaluates subset-sum
+//! instances using a controlled-adder circuit.
 
 mod index;
 mod sat;
+mod subset_sum;
 
 #[allow(deprecated)]
 pub use index::{GroverOracle, IndexOracle};
 pub use sat::CnfOracle;
+pub use subset_sum::{verify_subset_sum, SubsetSumOracle};
 
 use std::collections::HashMap;
 use std::fmt;

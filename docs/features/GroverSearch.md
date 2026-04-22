@@ -5,19 +5,20 @@ For the theory (how the algorithm works, why it's fast), see
 
 ## Status
 
-**Phase 1 (Core) ✅** — `algos/src/grover.rs`: `search()`,
-`GroverConfig`, `GroverResult`.
+**Phase 1 (Core) ✅** — `search()`, `GroverConfig`, `GroverResult`.
 
-**Phase 2 (Scaling n ≥ 4) ✅** — `algos/src/circuits/multi_cz.rs`:
-Barenco V-chain decomposition with `required_ancillas()` helper.
+**Phase 2 (Scaling n ≥ 4) ✅** — `circuits/multi_cz.rs`: Barenco
+V-chain decomposition with `required_ancillas()` helper.
 
 **Phase 3 (Oracle Trait) ✅** — `Oracle` trait with `IndexOracle`
-(marks by index) and `CnfOracle` (reversible SAT circuit).
-`try_search_with_oracle()` returns `Result`.
+and `CnfOracle`. `try_search_with_oracle()` returns `Result`.
 
-**Phase 4 (SAT Solver) ✅** — `algos/src/sat.rs`: `CnfOracle` with
-De Morgan circuit construction, clause canonicalization,
-`evaluate_cnf()` free function. `circuits/multi_cx.rs` for MCX.
+**Phase 4 (SAT Solver) ✅** — `CnfOracle` with De Morgan circuit,
+clause canonicalization, `evaluate_cnf()`. `circuits/multi_cx.rs`.
+
+**Phase 5 (Subset Sum) ✅** — `SubsetSumOracle` with MCX-cascade
+controlled adder + X-MCZ-X equality comparator. `circuits/adder.rs`.
+`verify_subset_sum()` for classical verification.
 
 ## Public API
 
@@ -33,15 +34,15 @@ pub trait Oracle {
 ```
 
 Phase oracle invariant: `O|x⟩|0⟩ = (-1)^f(x)|x⟩|0⟩`. Ancillas must
-be restored to |0⟩ after each application. See trait doc for full
-contract.
+be restored to |0⟩ after each application.
 
 ### Implementations
 
 | Type | Marks by | `num_solutions()` | Use case |
 |------|----------|:---:|----------|
 | `IndexOracle` | State index (X+MCZ+X per target) | `Some(m)` | Testing, known targets |
-| `CnfOracle` | Reversible CNF evaluation | `None` | SAT solving, quantum advantage |
+| `CnfOracle` | Reversible CNF evaluation | `None` | SAT solving |
+| `SubsetSumOracle` | Sum accumulator + equality check | `None` | Subset sum |
 
 ### Search Functions
 
@@ -53,18 +54,15 @@ let result = search(&config, target, &runner);
 let result = try_search_with_oracle(&config, &oracle, &runner)?;
 ```
 
-### SAT Utilities
+### Verification Utilities
 
 ```rust
-// Build circuit-based oracle (no classical pre-solving)
-let oracle = CnfOracle::new(num_vars, &clauses);
-
-// Classical verification of results
+// SAT: classical check of CNF assignment
 let is_sat = evaluate_cnf(&clauses, assignment);
-```
 
-`CnfOracle::new()` canonicalizes clauses: deduplicates literals, drops
-tautological clauses (`x ∨ ¬x`).
+// Subset sum: returns selected elements if valid, None otherwise
+let selected = verify_subset_sum(&elements, target, measured_state);
+```
 
 ## Architecture
 
@@ -83,6 +81,8 @@ try_search_with_oracle<O: Oracle>() ──┤
                   X+MCZ+X
                 CnfOracle:
                   De Morgan circuit
+                SubsetSumOracle:
+                  controlled_add → X-MCZ-X → uncompute
 ```
 
 ### Qubit Layout (disjoint pools)
@@ -104,27 +104,91 @@ final_mcz       = required_ancillas(c)
 total           = c + max(mcx_scratch, final_mcz)
 ```
 
-MCX scratch reuses across sequential clauses. MCZ scratch reuses the
-same pool (non-overlapping temporally).
+### SubsetSumOracle Ancilla Budget
+
+```
+sum_reg   = m = ⌈log₂(Σsᵢ + 1)⌉
+scratch   = max(0, m-2)     // shared MCX + MCZ pool
+total     = m + max(0, m-2)
+```
+
+MCX scratch (controlled additions) and MCZ scratch (equality check)
+are temporally disjoint — share a single pool. Implementation must
+slice to exact size before passing to `build_multi_cz`.
+
+## SubsetSumOracle
+
+### Circuit Strategy
+
+Compute → phase-flip → uncompute:
+
+1. **Compute**: for each element, `controlled_add(data[i], sum, scratch, sᵢ)`
+2. **Phase flip**: X-MCZ-X equality check (sum == T)
+3. **Uncompute**: reverse additions in reverse order
+
+The controlled adder uses an MCX-cascade incrementer — for each
+set bit of k, a carry cascade from MSB down flips the sum register
+in-place. No carry register needed.
+
+### Constructor Contract
+
+```rust
+/// # Panics
+/// - If `elements.len() < 2` (Grover requires n ≥ 2)
+/// - If all elements are zero (empty sum register)
+/// - If `target == 0` (trivially solved by empty subset)
+/// - If `target > sum of elements` (provably impossible)
+pub fn new(elements: &[u64], target: u64) -> Self
+```
+
+### Qubit Scaling
+
+| Elements | n | Total qubits | Notes |
+|----------|---|---|---|
+| `[3, 5, 7]` | 3 | 9 | instant |
+| `[2, 3, 5, 7]` | 4 | 14 | fast |
+| `[1, 2, 3, 5, 7]` | 5 | 16 | fine |
+| `[1, 2, 3, 4, 5, 6]` | 6 | 18 | fine |
+| `[1, 2, 3, 4, 5, 6, 7]` | 7 | 20 | borderline |
+
+Gate count: O(nm³) per oracle invocation, O(nm³·√(2ⁿ/M)) total.
+
+### References
+
+- Cuccaro et al., [arXiv:quant-ph/0410184](https://arxiv.org/abs/quant-ph/0410184)
+  — ripple-carry adder with MAJ/UMA primitives
+- Draper, [arXiv:quant-ph/0008033](https://arxiv.org/abs/quant-ph/0008033)
+  — QFT-based adder (future optimization path)
+- Qiskit `CDKMRippleCarryAdder`, `DraperQFTAdder`
 
 ## Files
 
 | File | Contents |
 |------|----------|
-| `crates/algos/src/grover.rs` | `Oracle` trait, `IndexOracle`, `GroverConfig/Result/Error`, `search`, `try_search_with_oracle` |
-| `crates/algos/src/sat.rs` | `Literal`, `CnfOracle`, `evaluate_cnf` |
-| `crates/algos/src/circuits/multi_cz.rs` | `build_multi_cz`, `required_ancillas` |
-| `crates/algos/src/circuits/multi_cx.rs` | `build_multi_cx`, `required_ancillas` |
-| `crates/examples/src/bin/grover.rs` | Single-target and multi-target demos |
-| `crates/examples/src/bin/sat_grover.rs` | CNF SAT → CnfOracle → Grover |
+| `grover/mod.rs` | `Oracle` trait, `GroverConfig/Result/Error`, `search`, `try_search_with_oracle` |
+| `grover/index.rs` | `IndexOracle` (X+MCZ+X marking) |
+| `grover/sat.rs` | `CnfOracle` (De Morgan circuit) |
+| `grover/subset_sum.rs` | `SubsetSumOracle`, `verify_subset_sum` |
+| `sat/mod.rs` | `Literal`, `Clause`, `evaluate_cnf` |
+| `circuits/multi_cz.rs` | `build_multi_cz`, `required_ancillas` |
+| `circuits/multi_cx.rs` | `build_multi_cx`, `required_ancillas` |
+| `circuits/adder.rs` | `controlled_add`, `controlled_add_inverse`, `required_scratch` |
+| `examples/.../grover.rs` | Single/multi-target demos |
+| `examples/.../sat_grover.rs` | CNF SAT → CnfOracle → Grover |
+| `examples/.../subset_sum.rs` | Subset sum → SubsetSumOracle → Grover |
 
-## Tests (124 total across workspace)
+## Tests (152 total across workspace)
 
-- Grover: 2-qubit (all targets), 3-qubit, explicit iterations,
-  custom Oracle trait, IterationsRequired error
-- IndexOracle: single/multi, dedup, panics (range, empty, shots)
+- Grover core: 2-qubit, 3-qubit, explicit iterations, custom Oracle,
+  IterationsRequired error
+- IndexOracle: single/multi, dedup, panics
 - CnfOracle: evaluation, canonicalization, ancilla budget, Grover
-  integration (single + multi-solution SAT)
+  integration
+- SubsetSumOracle: constructor validation (4 panic cases), ancilla
+  budget, Grover integration (single/multi solution, duplicates),
+  verify_subset_sum
+- Adder: concrete additions, carry propagation, control-off, boundary
+  m=1/2/3, inverse roundtrip, exhaustive m=3, scratch reset
 - MCZ/MCX: 1–5 qubit decomposition, ancilla uncomputation, CCZ symmetry
 
 ## roqoqo Gate Conventions
@@ -135,15 +199,14 @@ same pool (non-overlapping temporally).
 
 ## Open Questions
 
-- **Ancilla sharing**: Disjoint pools waste qubits for `IndexOracle`
-  (duplicates diffuser MCZ scratch). A shared pool of
-  `max(diffuser, oracle)` would suffice. Trade-off: clarity vs qubits.
+- **Ancilla sharing**: Disjoint pools waste qubits for `IndexOracle`.
+  A shared pool of `max(diffuser, oracle)` would suffice.
 
-- **Unsatisfiable formulas**: `CnfOracle` on UNSAT produces
-  near-uniform distribution with no error signal. Consider
-  `GroverResult::is_likely_unsatisfiable()`.
+- **Unsatisfiable/impossible instances**: Both `CnfOracle` on UNSAT and
+  `SubsetSumOracle` on no-solution produce near-uniform distributions
+  with no error signal. Consider `GroverResult::is_likely_unsatisfiable()`.
 
 - **Variable density**: `Literal::qubit()` assumes dense 1..=num_vars.
-  Sparse DIMACS needs a remapping pass.
 
-- **Unit propagation**: Not implemented. Separable optimization.
+- **QFT adder**: Would reduce gate count from O(nm³) to O(nm²) for
+  subset sum, enabling larger instances.
