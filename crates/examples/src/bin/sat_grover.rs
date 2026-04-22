@@ -4,8 +4,8 @@
 //! circuit evaluation) → Grover search → satisfying assignment.
 //! Uses SatOracle.evaluate() for classical verification only.
 
-use algos::grover::{try_search_with_oracle, GroverConfig};
-use algos::sat::{evaluate_cnf, CnfOracle, Literal};
+use algos::grover::{try_search_with_oracle, CnfOracle, GroverConfig};
+use algos::sat::{evaluate_cnf, Literal};
 use examples::quest_runner::QuestRunner;
 
 fn main() {
