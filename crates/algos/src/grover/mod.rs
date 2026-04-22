@@ -231,33 +231,17 @@ pub fn try_search_with_oracle<O: Oracle + ?Sized, R: QuantumRunner + ?Sized>(
     let circuit = build_grover_circuit(n, oracle, iterations);
 
     let bit_registers = runner.run(&circuit, config.num_shots);
+    let counts = crate::runner::Counts::from_register(&bit_registers, "result", n);
 
-    let mut counts: HashMap<usize, usize> = HashMap::new();
-    if let Some(shots) = bit_registers.get("result") {
-        for bits in shots {
-            let mut state: usize = 0;
-            for (i, &bit) in bits.iter().enumerate().take(n) {
-                if bit {
-                    state |= 1 << i;
-                }
-            }
-            *counts.entry(state).or_insert(0) += 1;
-        }
-    }
-
-    let (&measured_state, &max_count) = counts
-        .iter()
-        .max_by_key(|(_, &count)| count)
-        .unwrap_or((&0, &0));
-
-    let probability = max_count as f64 / config.num_shots as f64;
+    let (measured_state, _) = counts.most_frequent();
+    let probability = counts.probability(measured_state);
 
     Ok(GroverResult {
         measured_state,
         probability,
         success: None,
         num_iterations: iterations,
-        counts,
+        counts: counts.as_map().clone(),
     })
 }
 
