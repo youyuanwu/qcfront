@@ -10,22 +10,28 @@ Prioritized by impact for a Rust quantum computing research framework.
 | Grover search | `grover` | Configurable oracle, optimal iteration count |
 | Shor factoring | `shor` | QPE-based period finding, mod-15 arithmetic |
 | SAT solver | `sat` | CNF → Grover oracle with validated `Literal` type |
+| Subset sum | `grover/subset_sum` | Controlled-adder oracle for subset-sum instances |
 | State preparation | `state` | Möttönen decomposition, `QuantumState` newtype, fidelity |
 | Phase estimation | `qpe` | Reusable QPE with closure-based controlled unitaries |
+| Qubit type safety | `qubit` | `Qubit` newtype, `QubitRange`, `QubitAllocator` |
 | Runner abstraction | `runner` | `QuantumRunner` trait, backend-agnostic algorithms |
-| Circuit primitives | `circuits` | Multi-CZ, multi-CX, modular multiplication |
+| Circuit primitives | `circuits` | Multi-CZ, multi-CX, adder, modular multiplication |
+| Circuit transforms | `circuits/transform` | `inverse`, `within_apply`, `controlled` |
 | Number theory | `math` | Continued fractions, mod_pow, GCD |
 | Bit utilities | `qpe` | `bits_to_int_lsb/msb`, `extract_phase` |
 | Local simulation | `quest_runner` | QuEST backend via roqoqo-quest |
 | Cloud execution | `azure_runner` | Azure Quantum via QIR export + az CLI |
+| Teleportation | `examples/teleport` | Quantum teleportation demo |
+| Deutsch-Jozsa | `examples/deutsch_jozsa` | Constant vs balanced in 1 query, classical comparison |
 
 ## Priority 1 — High-impact new features
 
-**Measurement statistics (`Counts` type)**
-- Currently algorithms return raw `BitRegisters` (`HashMap<String, Vec<Vec<bool>>>`)
-- Need: `Counts` type with histogram, most-frequent result, probability distribution
-- Qiskit equivalent: `qiskit.result.Counts`, `plot_histogram()`
-- Would simplify every algorithm's result handling
+**Amplitude estimation / quantum counting**
+- QPE on the Grover operator to estimate solution count
+- Enables auto-tuned Grover (no manual iteration count)
+- General amplitude estimation for Monte Carlo, integration
+- Design complete: `docs/features/AmplitudeEstimation.md`
+- Qiskit equivalent: `qiskit.algorithms.AmplitudeEstimation`
 
 **Circuit optimization (peephole)**
 - Currently circuits are emitted with no optimization
@@ -34,13 +40,32 @@ Prioritized by impact for a Rust quantum computing research framework.
 - Qiskit equivalent: `qiskit.transpiler` (thousands of lines — we'd do 1%)
 - State preparation circuits are especially bloated without this
 
+**Resource estimation**
+- Count total gates, qubit count, circuit depth, T-count without simulating
+- Answers "how expensive is this circuit?" for any algorithm
+- Qiskit equivalent: none (Q#'s killer feature)
+- Useful for understanding algorithm scalability
+
 **Parameterized circuits**
 - roqoqo already supports `CalculatorFloat::Str("theta")` for symbolic angles
 - Need: wrapper API for binding parameter values to circuits
 - Qiskit equivalent: `Parameter`, `ParameterVector`, `circuit.bind_parameters()`
 - Required before implementing VQE/QAOA
 
-## Priority 2 — Algorithm extensions
+## Priority 2 — Textbook algorithms
+
+**Bernstein-Vazirani**
+- Find a hidden bitstring s in one query (classically needs n queries)
+- Uses H-oracle-H-measure pattern with inner-product oracle
+- ~80 lines, demonstrates quantum parallelism
+
+**Simon's algorithm**
+- Find hidden period of a 2-to-1 function
+- Predecessor to Shor — period finding via interference
+- Requires classical post-processing (linear algebra over GF(2))
+- Qiskit equivalent: `qiskit.algorithms.Simon`
+
+## Priority 3 — Advanced algorithms
 
 **VQE (Variational Quantum Eigensolver)**
 - Hybrid classical-quantum optimization loop
@@ -48,17 +73,23 @@ Prioritized by impact for a Rust quantum computing research framework.
 - Qiskit equivalent: `qiskit_algorithms.VQE`
 - Most requested quantum algorithm after Grover/Shor
 
-**Amplitude estimation**
-- Generalization of Grover's counting problem
-- Iterative and maximum-likelihood variants avoid QPE overhead
-- Qiskit equivalent: `qiskit_algorithms.AmplitudeEstimation`
+**QAOA (Quantum Approximate Optimization)**
+- Approximate solutions for combinatorial optimization (MaxCut, etc.)
+- Requires: parameterized circuits
+- Near-term practical quantum algorithm
+- Qiskit equivalent: `qiskit_algorithms.QAOA`
+
+**Quantum walk search**
+- Graph-structured search alternative to Grover
+- Quadratic speedup with graph topology awareness
+- More complex than Grover but applicable to structured problems
 
 **Quantum error correction codes**
 - Repetition code, Steane code, surface code basics
 - Qiskit equivalent: `qiskit.quantum_info` + Qiskit QEC experiments
 - Important for understanding fault tolerance
 
-## Priority 3 — Infrastructure
+## Priority 4 — Infrastructure
 
 **Noise modeling**
 - Depolarizing, amplitude damping, measurement error channels
