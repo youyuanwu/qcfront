@@ -4,7 +4,7 @@
 //! named groups, preventing qubit collision and dangling-index bugs at
 //! compile time.
 //!
-//! See `docs/features/QubitTypeSafety.md` for design rationale.
+//! See `notes/features/QubitTypeSafety.md` for design rationale.
 
 use std::fmt;
 use std::ops::RangeBounds;

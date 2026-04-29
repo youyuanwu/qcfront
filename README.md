@@ -56,7 +56,8 @@ crates/
     state.rs         State preparation
     runner.rs        QuantumRunner trait
   examples/src/bin/  Runnable demos
-docs/
+docs/              Published mdBook site sources (see book.toml)
+notes/             Working design notes and research
   theory/            Algorithm theory (Grover, gates, Bloch sphere)
   features/          Implementation docs (API, architecture)
   background/        Framework and hardware research

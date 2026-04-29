@@ -1,0 +1,16 @@
+[book]
+title = "qcfront"
+description = "A Rust quantum computing framework built on roqoqo and QuEST"
+authors = ["qcfront contributors"]
+language = "en"
+src = "docs"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/youyuanwu/qcfront"
+edit-url-template = "https://github.com/youyuanwu/qcfront/edit/main/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

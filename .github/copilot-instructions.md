@@ -13,6 +13,7 @@
 
 ## Documentation
 
-- Background research docs go in `docs/background/`.
-- Feature design docs go in `docs/features/`.
+- Background research notes go in `notes/background/`.
+- Feature design notes go in `notes/features/`.
+- Published documentation lives in `docs/` (mdBook).
 - Keep docs factual and cite sources.
